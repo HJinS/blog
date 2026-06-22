@@ -1,0 +1,479 @@
+---
+author: 허진수
+pubDatetime: 2026-06-21T17:19:22.737Z
+title: DDD 전술적 설계 1(Tactical Design)
+slug: ddd-2
+featured: false
+tags:
+  - ddd
+  - tactical-1
+description: DDD 전술적 설계 용어 정리
+---
+
+# DDD 전술적 설계 (Tactical Design)
+
+> **전략적 설계** 후에 진행하게될 **전술적 설계** 용어 정리
+> 전략적 설계(Bounded Context, Ubiquitous Language)로 경계를 정의했다면,
+> 전술적 설계는 그 경계 안에서 도메인 로직을 어떻게 표현할지를 다루게 됨.
+
+
+## 1. Entity (엔티티)
+
+### 정의
+- **식별자(ID)** 로 구분되는 객체
+- 시간이 지나도 동일한 ID를 가지면 같은 객체로 취급
+- 상태(State)가 변할 수 있음
+
+### 특징
+
+| 항목 | 내용 |
+|------|------|
+| 동일성 | ID 기반 비교 |
+| 가변성 | 상태 변경 가능 |
+| 생명주기 | 생성 → 변경 → 소멸 |
+
+### 코드 예시 (Kotlin)
+
+```kotlin
+class Order(
+    val id: OrderId,          // 식별자
+    var status: OrderStatus,  // 변경 가능한 상태
+    val items: MutableList<OrderItem>
+) {
+    // 도메인 로직을 내부에 캡슐화
+    fun addItem(item: OrderItem) {
+        require(status == OrderStatus.PENDING) { "주문 확정 후에는 아이템을 추가할 수 없습니다." }
+        items.add(item)
+    }
+
+    fun confirm() {
+        require(items.isNotEmpty()) { "아이템이 없으면 주문을 확정할 수 없습니다." }
+        status = OrderStatus.CONFIRMED
+    }
+
+    override fun equals(other: Any?): Boolean {
+        if (other !is Order) return false
+        return id == other.id  // ID로만 비교
+    }
+}
+```
+
+### 핵심 원칙
+- 비즈니스 로직은 Entity 내부에 위치 (빈약한 도메인 모델 지양)
+- 상태 변경 메서드에는 도메인 규칙 검증 포함
+- Setter를 직접 노출하지 않고 의미있는 메서드명 사용
+
+---
+
+## 2. Value Object (값 객체)
+
+### 정의
+- **값 자체** 로 구분되는 객체
+- 식별자 없이 속성(값)이 동일하면 같은 객체
+- 불변(Immutable)
+
+### 특징
+
+| 항목 | 내용 |
+|------|------|
+| 동일성 | 속성값 기반 비교 |
+| 불변성 | 변경 불가 (새 객체 생성) |
+| 자가 검증 | 생성 시점에 유효성 검사 |
+
+### 코드 예시 (Kotlin)
+
+```kotlin
+data class Money(
+    val amount: BigDecimal,
+    val currency: Currency
+) {
+    init {
+        require(amount >= BigDecimal.ZERO) { "금액은 0 이상이어야 합니다." }
+    }
+
+    // 변경 시 새 객체 반환
+    operator fun plus(other: Money): Money {
+        require(currency == other.currency) { "통화가 다릅니다." }
+        return Money(amount + other.amount, currency)
+    }
+
+    operator fun times(multiplier: Int): Money {
+        return Money(amount * multiplier.toBigDecimal(), currency)
+    }
+}
+
+data class Address(
+    val street: String,
+    val city: String,
+    val zipCode: String
+)
+```
+
+### 언제 Value Object를 쓸까?
+- 금액, 날짜 범위, 좌표, 주소, 이메일 등
+- 개념적으로 "측정값"이나 "설명"에 해당하는 것들
+- Entity의 속성을 풍부하게 표현하고 싶을 때
+
+---
+
+## 3. Aggregate (애그리게이트)
+
+### 정의
+- **일관성 경계(Consistency Boundary)** 를 형성하는 Entity/Value Object의 묶음
+- 외부에서는 반드시 **Aggregate Root** 를 통해서만 접근
+- 하나의 트랜잭션 = 하나의 Aggregate
+
+### 구조
+
+```
+Order (Aggregate Root)
+ ├── OrderId (Value Object)
+ ├── CustomerId (Value Object - 다른 Aggregate 참조는 ID만)
+ ├── OrderItems [ ] (Entity)
+ │    ├── ProductId (Value Object)
+ │    ├── Quantity (Value Object)
+ │    └── Price (Value Object)
+ └── ShippingAddress (Value Object)
+```
+
+### 설계 원칙
+
+1. **작게 유지**: Aggregate는 가능한 작게 설계 (성능, 동시성)
+2. **ID로만 참조**: 다른 Aggregate는 ID로만 참조 (객체 직접 참조 금지)
+3. **트랜잭션 경계**: 하나의 트랜잭션에서 하나의 Aggregate만 변경
+4. **불변식(Invariant) 보호**: Aggregate Root가 내부 일관성 책임
+
+### 코드 예시 (Kotlin)
+
+```kotlin
+class Order private constructor(
+    val id: OrderId,
+    val customerId: CustomerId,   // ← 다른 Aggregate는 ID만 참조
+    private val _items: MutableList<OrderItem> = mutableListOf(),
+    var status: OrderStatus = OrderStatus.PENDING
+) {
+    val items: List<OrderItem> get() = _items.toList()
+
+    val totalPrice: Money
+        get() = _items.fold(Money.ZERO) { acc, item -> acc + item.subtotal }
+
+    fun addItem(productId: ProductId, quantity: Quantity, unitPrice: Money) {
+        check(status == OrderStatus.PENDING)
+        val existingItem = _items.find { it.productId == productId }
+        if (existingItem != null) {
+            existingItem.increaseQuantity(quantity)
+        } else {
+            _items.add(OrderItem(productId, quantity, unitPrice))
+        }
+    }
+
+    fun confirm() {
+        check(_items.isNotEmpty()) { "주문 항목이 없습니다." }
+        check(status == OrderStatus.PENDING)
+        status = OrderStatus.CONFIRMED
+    }
+
+    companion object {
+        fun create(customerId: CustomerId): Order {
+            return Order(OrderId.generate(), customerId)
+        }
+    }
+}
+```
+
+---
+
+## 4. Domain Event (도메인 이벤트)
+
+### 정의
+- 도메인에서 발생한 **중요한 사실(fact)** 을 나타내는 불변 객체
+- 과거형 이름 사용 (e.g. `OrderConfirmed`, `PaymentProcessed`)
+- Aggregate 간 느슨한 결합 달성에 활용
+
+### 이벤트 흐름
+
+```
+Aggregate 
+  └─ 도메인 로직 수행
+       └─ Domain Event 발행
+            ├─ 같은 Bounded Context의 다른 Aggregate 업데이트
+            └─ 다른 Bounded Context로 전파 (통합 이벤트)
+```
+
+### 코드 예시 (Kotlin)
+
+```kotlin
+// 도메인 이벤트 정의
+data class OrderConfirmed(
+    val orderId: OrderId,
+    val customerId: CustomerId,
+    val totalPrice: Money,
+    val occurredAt: Instant = Instant.now()
+) : DomainEvent
+
+// Aggregate에서 이벤트 발행
+class Order(...) : AggregateRoot() {
+    fun confirm() {
+        check(_items.isNotEmpty())
+        status = OrderStatus.CONFIRMED
+        // 이벤트 등록 (발행은 Repository 저장 이후)
+        registerEvent(OrderConfirmed(id, customerId, totalPrice))
+    }
+}
+
+// 이벤트 핸들러
+class OrderConfirmedHandler {
+    fun handle(event: OrderConfirmed) {
+        // 재고 차감, 포인트 적립, 알림 발송 등
+    }
+}
+```
+
+### 이벤트 vs 명령(Command)
+
+| | Domain Event | Command |
+|---|---|---|
+| 의미 | 이미 일어난 사실 | 수행 요청 |
+| 네이밍 | 과거형 (OrderConfirmed) | 명령형 (ConfirmOrder) |
+| 거부 여부 | 거부 불가 | 거부 가능 |
+| 수신자 | 0..N개 핸들러 | 1개 핸들러 |
+
+---
+
+## 5. Repository (레포지토리)
+
+### 정의
+- Aggregate의 **영속성 추상화** 계층
+- 컬렉션처럼 동작하는 인터페이스 제공
+- 도메인 계층은 구현체(JPA, MongoDB 등)를 몰라야 함
+
+### 원칙
+- Aggregate 단위로 Repository 하나 (Entity마다 Repository를 만들지 않음)
+- 인터페이스는 도메인 계층, 구현체는 인프라 계층
+- 조회 메서드는 도메인 언어로 표현
+
+### 코드 예시 (Kotlin)
+
+```kotlin
+// 도메인 계층 - 인터페이스
+interface OrderRepository {
+    fun findById(id: OrderId): Order?
+    fun findByCustomerId(customerId: CustomerId): List<Order>
+    fun findPendingOrders(): List<Order>
+    fun save(order: Order)
+    fun delete(order: Order)
+}
+
+// 인프라 계층 - 구현체 (Spring Data JPA 예시)
+@Repository
+class JpaOrderRepository(
+    private val jpaRepo: OrderJpaRepository,
+    private val mapper: OrderMapper
+) : OrderRepository {
+    override fun findById(id: OrderId): Order? =
+        jpaRepo.findById(id.value).orElse(null)?.let(mapper::toDomain)
+
+    override fun save(order: Order) {
+        val entity = mapper.toEntity(order)
+        jpaRepo.save(entity)
+        // 도메인 이벤트 발행
+        order.domainEvents.forEach { eventPublisher.publish(it) }
+        order.clearEvents()
+    }
+}
+```
+
+---
+
+## 6. Domain Service (도메인 서비스)
+
+### 정의
+- **어떤 Entity나 Value Object에도 자연스럽게 속하지 않는** 도메인 로직을 담는 곳
+- 무상태(Stateless)
+- 도메인 개념을 반영한 이름 사용
+
+### Entity/Value Object vs Domain Service 판단 기준
+
+> "이 로직이 특정 객체의 책임인가?"
+> - YES → Entity 또는 Value Object의 메서드
+> - NO  → Domain Service
+
+### 코드 예시 (Kotlin)
+
+```kotlin
+// 두 Account 간 이체: 어느 Account에 속하지 않음 → Domain Service
+class TransferService(
+    private val accountRepository: AccountRepository
+) {
+    fun transfer(fromId: AccountId, toId: AccountId, amount: Money) {
+        val from = accountRepository.findById(fromId) ?: error("계좌 없음")
+        val to = accountRepository.findById(toId) ?: error("계좌 없음")
+
+        from.withdraw(amount)
+        to.deposit(amount)
+
+        accountRepository.save(from)
+        accountRepository.save(to)
+    }
+}
+
+// 가격 정책 계산: 여러 도메인 객체를 조합 → Domain Service
+class PricingService {
+    fun calculatePrice(product: Product, customer: Customer, quantity: Quantity): Money {
+        val basePrice = product.price * quantity.value
+        val discount = customer.membershipLevel.discountRate
+        return basePrice * (1 - discount)
+    }
+}
+```
+
+---
+
+## 7. Factory (팩토리)
+
+### 정의
+- 필수는 아니며 필요시 선택적으로 사용
+- 복잡한 Aggregate/Entity 생성 로직을 캡슐화
+- 생성 시 불변식(Invariant) 검사와 초기화를 책임
+
+### 위치 선택
+
+| 방식 | 사용 시기 |
+|------|-----------|
+| `companion object` / static factory | 간단한 생성, 자주 쓰이는 패턴 |
+| 별도 Factory 클래스 | 복잡한 조합, 외부 의존성 필요 시 |
+| Factory Method (다른 Aggregate에서) | 생성 책임이 다른 도메인 개념에 있을 때 |
+
+### 코드 예시 (Kotlin)
+
+```kotlin
+// 별도 Factory 클래스
+class OrderFactory(
+    private val productRepository: ProductRepository
+) {
+    fun createFromCart(cart: Cart, shippingAddress: Address): Order {
+        val order = Order.create(cart.customerId)
+        cart.items.forEach { cartItem ->
+            val product = productRepository.findById(cartItem.productId)
+                ?: error("상품을 찾을 수 없습니다: ${cartItem.productId}")
+            require(product.isAvailable) { "판매 중지된 상품입니다: ${product.name}" }
+            order.addItem(product.id, cartItem.quantity, product.currentPrice)
+        }
+        order.setShippingAddress(shippingAddress)
+        return order
+    }
+}
+```
+
+---
+
+## 8. Application Service vs Domain Service
+
+도메인 로직이 어디에 들어가야 할지 헷갈릴 때 아래 기준으로 판단
+
+```
+요청 진입
+    │
+    ▼
+Application Service (유스케이스 조율)
+    ├── 트랜잭션 관리
+    ├── 보안/권한 확인
+    ├── Repository 호출
+    ├── Domain Service 호출
+    └── 이벤트 발행 조율
+         │
+         ▼
+    Domain Layer
+    ├── Entity / Aggregate (핵심 비즈니스 로직)
+    ├── Value Object (도메인 개념 표현)
+    ├── Domain Service (엔티티 간 로직)
+    └── Domain Event (사실 기록)
+```
+
+| | Application Service | Domain Service |
+|---|---|---|
+| 위치 | Application 계층 | Domain 계층 |
+| 역할 | 유스케이스 조율 | 도메인 로직 |
+| 도메인 지식 | 없음 | 있음 |
+| 상태 | 무상태 | 무상태 |
+| 인프라 의존 | 가능 | 없음 |
+
+### Application Service 예시
+
+```kotlin
+@Service
+@Transactional
+class OrderCommandService(
+    private val orderRepository: OrderRepository,
+    private val orderFactory: OrderFactory,
+    private val cartRepository: CartRepository
+) {
+    fun placeOrder(command: PlaceOrderCommand): OrderId {
+        // 1. 조회
+        val cart = cartRepository.findById(command.cartId) ?: error("장바구니 없음")
+
+        // 2. 도메인 로직 위임 (Factory / Aggregate)
+        val order = orderFactory.createFromCart(cart, command.shippingAddress)
+        order.confirm()
+
+        // 3. 영속화
+        orderRepository.save(order)
+
+        return order.id
+    }
+}
+```
+
+---
+
+## 9. 전술적 설계 적용 흐름
+
+### Step 1. 도메인 모델 식별
+
+유비쿼터스 언어를 기반으로 핵심 개념 나열
+
+```
+주문(Order), 고객(Customer), 상품(Product), 결제(Payment), 배송(Shipment)
+```
+
+### Step 2. Entity vs Value Object 구분
+
+| 객체 | 식별자 필요? | 분류 |
+|------|------------|------|
+| Order | ✅ | Entity |
+| Customer | ✅ | Entity |
+| Money | ❌ | Value Object |
+| Address | ❌ | Value Object |
+| OrderItem | 맥락에 따라 | Entity (Order 내부) |
+
+### Step 3. Aggregate 경계 설계
+
+```
+[Order Aggregate]           [Customer Aggregate]       [Product Aggregate]
+  - Order (Root)              - Customer (Root)           - Product (Root)
+  - OrderItem                 - Address                   - Price
+  - ShippingAddress           - MembershipLevel           - StockCount
+```
+
+### Step 4. 불변식(Invariant) 정의
+
+> - 주문은 아이템이 1개 이상일 때만 확정할 수 있다.
+> - 재고가 부족하면 주문 아이템을 추가할 수 없다.
+> - 확정된 주문은 수정할 수 없다.
+
+### Step 5. Repository & Service 결정
+
+- 각 Aggregate Root마다 Repository 1개
+- Entity 간 로직이 필요하면 Domain Service로 분리
+- 유스케이스 조율은 Application Service가 담당
+
+### Step 6. Domain Event 도출
+
+```
+OrderPlaced → 재고 감소, 결제 요청
+OrderConfirmed → 배송 준비 시작
+OrderCancelled → 재고 복구, 환불 처리
+PaymentCompleted → 주문 상태 변경
+```
+
+---

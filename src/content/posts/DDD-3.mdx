@@ -1,0 +1,324 @@
+---
+author: 허진수
+pubDatetime: 2026-06-21T17:20:37.000Z
+title: DDD 전술적 설계 2(Tactical Design)
+slug: ddd-3
+featured: false
+tags:
+  - ddd
+  - tactical-2
+description: DDD 전술적 설계 순서
+---
+
+
+```
+전술적 설계 핵심 요약
+
+Entity          → ID로 구분, 상태 변화 가능, 비즈니스 로직 캡슐화
+Value Object    → 값으로 구분, 불변, 자가 검증
+Aggregate       → 일관성 경계, Root를 통한 접근, 작게 유지
+Domain Event    → 과거 사실, 느슨한 결합, 통합에 활용
+Repository      → Aggregate 단위 영속성 추상화
+Domain Service  → 여러 객체에 걸친 무상태 도메인 로직
+Factory         → 복잡한 객체 생성 캡슐화
+App Service     → 유스케이스 조율, 도메인 지식 없음
+```
+
+> **핵심**: 도메인 로직은 도메인 객체 안에! Application Service는 조율만!
+
+
+## 전술적 설계 태스크 (전략적 설계 완료 후)
+
+> 전략적 설계(Bounded Context, Context Map, Ubiquitous Language)가 완료된 상태에서  
+> 전술적 설계를 진행하는 순서와 각 태스크를 정리.
+
+### 전체 흐름
+
+```
+[설계 확인]
+    └─ 전략적 설계 산출물 검토
+           │
+           ▼
+[도메인 모델 설계]  ← 코드 작성 전, 팀 합의 단계
+    ├─ Entity / Value Object 분류
+    ├─ Aggregate 경계 설계
+    └─ 불변식(Invariant) 정의
+           │
+           ▼
+[도메인 계층 구현]  ← 인프라 의존 없는 순수 도메인 코드
+    ├─ Value Object 구현  (Entity보다 먼저)
+    ├─ Aggregate / Entity 구현
+    ├─ Domain Event 구현
+    ├─ Domain Service 구현
+    ├─ Factory 구현
+    └─ Repository 인터페이스 정의
+           │
+           ▼
+[검증 → 외부 연결]
+    ├─ 도메인 단위 테스트
+    ├─ Application Service 구현
+    ├─ Repository 구현체 (인프라)
+    ├─ Domain Event 핸들러 구현
+    └─ 통합 테스트 및 최종 검증
+```
+
+---
+
+### Task 1. 전략적 설계 산출물 검토 및 전술 설계 준비
+
+완료된 전략적 설계 결과물(Bounded Context 목록, Context Map, Ubiquitous Language 사전)을 검토하고,
+전술적 설계를 시작할 BC 우선순위를 결정한다. 각 BC별 핵심 도메인 개념 목록 초안을 작성한다.
+
+**체크리스트**
+- [ ] BC 목록과 각 BC의 책임 범위 파악
+- [ ] Context Map에서 BC 간 관계 유형 확인 (ACL, Shared Kernel, Conformist 등)
+- [ ] Ubiquitous Language 사전 BC별 정리 확인
+- [ ] 구현 착수 BC 우선순위 결정
+
+---
+
+### Task 2. BC별 Entity / Value Object 식별 및 분류
+
+Ubiquitous Language 사전을 기반으로 각 BC 내 개념을 Entity와 Value Object로 분류한다.
+
+**판단 기준**: "식별자(ID)가 필요한가?" → Entity / 값 자체로 구분되는가? → Value Object
+
+| 개념 | 식별자 필요? | 분류 | 이유 |
+|------|:-----------:|------|------|
+| Order | ✅ | Entity | 주문 이력 추적 필요 |
+| Customer | ✅ | Entity | 개별 고객 관리 필요 |
+| Product | ✅ | Entity | 상품 정보 변경 추적 |
+| Money | ❌ | Value Object | 금액+통화 값으로 충분 |
+| Address | ❌ | Value Object | 주소 자체가 의미 단위 |
+| Quantity | ❌ | Value Object | 수량 값으로 충분 |
+
+**체크리스트**
+- [ ] 모든 UL 개념에 대해 분류 완료
+- [ ] 분류 결과를 팀/도메인 전문가와 검증
+- [ ] 모호한 개념은 UL 사전에 추가 정의
+
+---
+
+### Task 3. Aggregate 경계 설계 및 Aggregate Root 지정
+
+Entity들을 묶어 일관성 경계(Aggregate)를 설계하고 각 Aggregate의 Root를 지정한다.
+
+**설계 원칙**
+- 작게 유지 — 성능, 동시성 문제 예방
+- 다른 Aggregate는 ID로만 참조
+- 트랜잭션 경계 = Aggregate 경계
+- Context Map 참고 → 외부 BC 참조 방식 결정 (ID 참조 vs ACL)
+
+**체크리스트**
+- [ ] 각 Aggregate의 Root Entity 지정
+- [ ] Aggregate 간 참조가 ID로만 이루어지는지 확인
+- [ ] 트랜잭션 경계가 Aggregate 경계와 일치하는지 검토
+- [ ] 외부 BC 참조 방식 결정 (Context Map 기반)
+
+---
+
+### Task 4. Aggregate별 불변식(Invariant) 정의
+
+각 Aggregate가 항상 보장해야 하는 비즈니스 규칙을 도출한다.  
+불변식은 이후 Entity 메서드 내부의 guard 조건으로 직접 구현된다.
+
+**예시**
+```
+Order Aggregate
+  - 주문 확정 시 아이템이 1개 이상이어야 한다
+  - 확정된 주문은 수정할 수 없다
+  - 취소된 주문은 재확정할 수 없다
+
+Product Aggregate
+  - 재고가 0 미만이 될 수 없다
+  - 판매 중지 상품은 주문에 추가할 수 없다
+```
+
+**체크리스트**
+- [ ] 각 Aggregate에 대해 불변식 목록 작성
+- [ ] 도메인 전문가와 불변식 검증
+- [ ] 불변식이 특정 메서드에서만 적용되는지 / 항상 적용되는지 구분
+
+---
+
+### Task 5. Value Object 구현
+
+분류된 Value Object를 코드로 구현한다. **Entity 구현 전에 먼저 완성한다.**
+
+**구현 요건**
+- 불변 (`data class` 또는 `val`만 사용)
+- 생성자(init 블록)에서 유효성 검증
+- 값 기반 동등성(`equals`/`hashCode`)
+- 변경 시 새 객체 반환
+
+**체크리스트**
+- [ ] 모든 Value Object 구현 완료
+- [ ] 각 VO의 유효성 검사 로직 포함 여부 확인
+- [ ] 불변성 보장 확인 (mutable 필드 없음)
+- [ ] VO 단위 테스트 작성
+
+---
+
+### Task 6. Aggregate 및 Entity 구현
+
+Aggregate Root 및 내부 Entity를 구현한다.
+
+**구현 요건**
+- 불변식을 메서드 guard 조건으로 반영 (`check`, `require`)
+- 상태 변경은 의미있는 메서드명으로 표현 (`confirm()`, `cancel()`)
+- 컬렉션 직접 노출 금지 (내부 `MutableList`, 외부 `List` 반환)
+- 생성은 `private` 생성자 + `companion object` factory 패턴
+
+**체크리스트**
+- [ ] 모든 Aggregate Root 구현 완료
+- [ ] 불변식이 메서드 내 guard 조건으로 구현되었는지 확인
+- [ ] setter 직접 노출 없음 확인
+- [ ] 다른 Aggregate를 ID로만 참조하는지 확인
+
+---
+
+### Task 7. Domain Event 도출 및 구현
+
+각 Aggregate의 주요 상태 변화에서 Domain Event를 도출하고 구현한다.
+
+**네이밍 규칙**: 과거형 동사 + 명사 (`OrderConfirmed`, `PaymentCompleted`)
+
+**예시 이벤트 목록**
+```
+OrderPlaced      → 재고 감소, 결제 요청
+OrderConfirmed   → 배송 준비 시작
+OrderCancelled   → 재고 복구, 환불 처리
+PaymentCompleted → 주문 상태 변경
+```
+
+**체크리스트**
+- [ ] 주요 상태 변화마다 이벤트 도출 완료
+- [ ] 이벤트는 불변 `data class`로 구현
+- [ ] `occurredAt` 타임스탬프 포함
+- [ ] BC 간 통합 이벤트 별도 구분
+- [ ] Aggregate Root에 `registerEvent()` 패턴 적용
+
+---
+
+### Task 8. Domain Service 식별 및 구현
+
+특정 Entity/Value Object에 자연스럽게 속하지 않는 도메인 로직을 Domain Service로 분리한다.
+
+**판단 기준**
+> "이 로직이 특정 객체의 책임인가?"  
+> YES → Entity/VO의 메서드 / NO → Domain Service
+
+**체크리스트**
+- [ ] 여러 Aggregate에 걸치는 로직 식별
+- [ ] 무상태(stateless) 구현 확인
+- [ ] 인프라 의존 없음 확인 (인프라 의존이 생기면 Application Service로 이동)
+
+---
+
+### Task 9. Factory 구현
+
+복잡한 Aggregate 생성 로직을 Factory로 캡슐화한다.
+
+| 방식 | 사용 시기 |
+|------|-----------|
+| `companion object` factory | 간단한 생성, 외부 의존 없음 |
+| 별도 Factory 클래스 | 외부 의존성 필요 (Repository 등) |
+| Factory Method | 생성 책임이 다른 도메인 개념에 있을 때 |
+
+**체크리스트**
+- [ ] 생성 로직이 복잡한 Aggregate 식별
+- [ ] 생성 시 불변식 검증 포함 여부 확인
+- [ ] 외부 의존성 유무에 따라 방식 결정
+
+---
+
+### Task 10. Repository 인터페이스 정의 (도메인 계층)
+
+Aggregate Root마다 Repository 인터페이스를 도메인 계층에 정의한다.
+
+**원칙**
+- Aggregate Root 하나 당 Repository 하나
+- 메서드명은 Ubiquitous Language 기반
+- 인터페이스만 도메인 계층에 위치 (구현체는 인프라 계층)
+
+**체크리스트**
+- [ ] 모든 Aggregate Root에 대한 Repository 인터페이스 작성
+- [ ] 조회 메서드가 도메인 언어로 표현되어 있는지 확인
+- [ ] 인터페이스가 인프라에 의존하지 않는지 확인
+
+---
+
+### Task 11. 도메인 계층 단위 테스트 작성
+
+인프라 없이 순수 도메인 로직만 테스트한다.
+
+**테스트 대상**
+- Entity 불변식 검증 (정상 케이스 + 예외 케이스)
+- Value Object 동등성 / 연산 / 유효성 검사
+- Domain Service 로직
+- Domain Event 발행 여부 확인
+
+**체크리스트**
+- [ ] 각 불변식에 대한 테스트 케이스 작성
+- [ ] 경계값(boundary) 케이스 포함
+- [ ] 외부 의존성 없이 테스트 실행 가능한지 확인
+
+---
+
+### Task 12. Application Service 구현
+
+유스케이스 단위로 Application Service를 작성한다.
+
+**역할**
+- 트랜잭션 관리
+- 권한/보안 확인
+- Repository / Factory / Domain Service 호출 조율
+- **도메인 로직은 이 계층에 두지 않음**
+
+**체크리스트**
+- [ ] 유스케이스 단위로 Command/Query 분리 (CQRS 고려)
+- [ ] 트랜잭션 경계가 Aggregate 경계와 일치하는지 확인
+- [ ] 도메인 로직이 Application Service에 새어나오지 않는지 리뷰
+
+---
+
+### Task 13. Repository 구현체 및 영속성 매핑 작성 (인프라 계층)
+
+실제 저장소(JPA/MongoDB 등) 구현체와 도메인 ↔ 영속성 모델 매핑을 작성한다.
+
+**체크리스트**
+- [ ] 도메인 계층 Repository 인터페이스 구현
+- [ ] 도메인 객체 ↔ 영속성 모델 Mapper 구현
+- [ ] `save()` 시 Domain Event 발행 연동
+- [ ] DB 교체 시 도메인 코드 변경 없이 가능한지 확인
+
+---
+
+### Task 14. Domain Event 핸들러 구현 및 BC 간 통합
+
+이벤트별 핸들러를 구현하고 BC 간 통합 방식을 결정한다.
+
+**통합 방식 선택 기준** (Context Map 기반)
+- 같은 BC 내 → 동기 처리
+- 다른 BC → 비동기 (메시지 큐 / Kafka)
+- Downstream BC가 ACL 적용 중 → Anti-Corruption Layer 통해 변환
+
+**체크리스트**
+- [ ] 각 Domain Event에 대한 핸들러 작성
+- [ ] BC 간 통합 방식 결정 및 문서화
+- [ ] 이벤트 발행 실패 시 재시도/보상 트랜잭션 전략 수립
+
+---
+
+### Task 15. 통합 테스트 및 전술 설계 검증
+
+Application Service → Domain → Repository → DB 전체 흐름을 통합 테스트하고,
+전술 설계가 전략적 설계 산출물을 올바르게 반영하는지 최종 검증한다.
+
+**체크리스트**
+- [ ] 주요 유스케이스 E2E 통합 테스트 작성
+- [ ] BC 간 이벤트 연동 흐름 테스트
+- [ ] Ubiquitous Language가 코드(클래스명/메서드명)에 반영되어 있는지 리뷰
+- [ ] Aggregate 경계가 Context Map의 BC 경계와 일치하는지 검토
+- [ ] 불변식이 모든 진입점에서 보호되고 있는지 확인
+

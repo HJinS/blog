@@ -1,0 +1,61 @@
+---
+author: 허진수
+pubDatetime: 2026-06-22T22:09:01.737Z
+title: Django 요약
+slug: django-summary
+featured: false
+tags:
+  - django
+description: Django 요약
+---
+
+## 📂 Django (DRF)
+
+### 1. Django Throttling
+- **개요**: 인증/비인증 사용자의 요청 횟수를 제한하는 DRF 기능. 여러 Throttle을 함께, API별로도 설정 가능.
+- ⚠️ 공식 문서는 이를 **DoS 공격 방어책으로 쓰지 말 것**을 경고.
+- **전역 설정**: `REST_FRAMEWORK`의 `DEFAULT_THROTTLE_CLASSES`(`AnonRateThrottle`, `UserRateThrottle`)와 `DEFAULT_THROTTLE_RATES`로 지정.
+
+### 2. DRF Cache
+- **개요**: DRF의 캐싱은 Django 캐싱을 그대로 이용. `method_decorator`로 `cache_page`, `vary_on_cookie`, `vary_on_header` 등 적용 가능.
+- **Django Cache**: 여러 레벨(특정 부분 ~ 전체 사이트) 캐시 제공.
+- **설정**: `settings.py`의 `CACHES`에 `BACKEND`(바인딩 경로), `LOCATION`(데몬 위치 `ip:port` 또는 unix 소켓 경로) 지정.
+
+### 3. DRF Content Negotiation
+- **Content Negotiation**: 동일 URI에서 리소스의 서로 다른 표현(프레젠테이션)을 제공하기 위한 HTTP 메커니즘. 호출 시 어떤 프레젠테이션을 선택할지 결정하는 방법.
+- **결정 방식**
+  - **서버 주도 협상**: HTTP 요청 헤더를 힌트로 서버가 컨텐츠 선택. (알고리즘은 서버 특유)
+  - **에이전트 주도 협상**: HTTP 응답 코드를 이용 (리액티브 협상, 폴백 메커니즘으로 사용)
+- 관련 헤더(HTTP/1.1): `Accept`, `Accept-Language` 등.
+
+### 4. DRF Serializer Relations
+- **개요**: 모델 간 관계(`ForeignKey`, `ManyToManyField`, `OneToOneField`)를 표현할 때 사용.
+- `ModelSerializer`는 기본적으로 **`PrimaryKeyRelatedField`** 를 써서 관계 필드를 자동 생성.
+- 예시: `Album` ↔ `Track`(FK, `related_name='tracks'`) 관계로 다양한 관계 필드를 다룸.
+
+### 5. DRF Versioning
+- **개요**: 서로 다른 클라이언트별로 동작을 다르게 지정. 버전은 **요청 URL 또는 헤더**로 결정됨.
+- **사용**: 활성화되면 `request.version`으로 확인 가능.
+  ```python
+  def get_serializer_class(self):
+      if self.request.version == 'v1':
+          return AccountSerializerVersion1
+      return AccountSerializer
+  ```
+- **reverse**: `urls.py`의 `name`/`viewname`을 다시 URL로 변환. 버전에 따라 생성되는 URL도 달라짐.
+
+### 6. Django CacheOps
+- **개요**: ORM 쿼리 결과를 Redis에 자동 캐싱해주는 라이브러리.
+- **설정(`CACHEOPS_REDIS`)**
+  - 딕셔너리 방식: `host`, `port`, `db`, `socket_timeout`, `password`, `unix_socket_path` 등 지정.
+  - URL 방식도 가능: `"redis://localhost:6379/1"`, `"unix://path/to/socket?db=1"`, 비밀번호 포함 `"redis://:password@localhost:6379/1"`.
+  - Sentinel 설정도 지원.
+
+### 7. DRF 기본 인증과 인가
+> 기준: Django 3.2 + DRF + Session
+
+- **인증 과정**
+  1. API 요청으로 ID/Password 등 검증 완료 후 `django.contrib.auth.login` 호출 → 세션 획득.
+  2. 세션 갱신, 유저 Backend 확인·연결, **CSRF Token 갱신(발급)** 진행. (보통 `ModelBackend` 사용)
+  3. `user_logged_in` signal 전송 후 인증 완료.
+- Django 기본 인증 중 쿠키를 쓰는 건 세션이 유일 → 세션 발급 시 CSRF Token을 갱신.
