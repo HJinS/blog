@@ -24,7 +24,6 @@ export default defineAstroPaperConfig({
     showBackButton: true,
     editPost: {
       enabled: false,
-      url: "https://github.com/HJinS/HJinS.github.io/edit/main/",
     },
     search: "pagefind",
   },
