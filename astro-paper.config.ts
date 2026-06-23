@@ -2,7 +2,7 @@ import { defineAstroPaperConfig } from "./src/types/config";
 
 export default defineAstroPaperConfig({
   site: {
-    url: "https://hjins.github.io",
+    url: "https://hjins.github.io/blog",
     title: "메모장",
     description: "잊지 않기 위한 메모장",
     author: "진수",
