@@ -27,7 +27,14 @@ const recentPosts = sortedPosts.filter(({ data }) => !data.featured);
 const uniqueTags = getUniqueTags(posts);
 const homePath = getRelativeLocaleUrl(locale, "");
 
-const techStack = ["Java", "Kotlin", "Spring Boot", "DDD", "PostgreSQL", "Docker"];
+const techStack = [
+  "Java",
+  "Kotlin",
+  "Spring Boot",
+  "DDD",
+  "PostgreSQL",
+  "Docker",
+];
 ---
 
 <Layout>
@@ -66,17 +73,19 @@ const techStack = ["Java", "Kotlin", "Spring Boot", "DDD", "PostgreSQL", "Docker
       </p>
 
       <div class="mt-4 flex flex-wrap gap-2">
-        {techStack.map(tech => (
-          <span class="border-foreground/30 text-foreground/80 rounded border px-2 py-0.5 text-sm font-mono">
-            {tech}
-          </span>
-        ))}
+        {
+          techStack.map(tech => (
+            <span class="border-foreground/30 text-foreground/80 rounded border px-2 py-0.5 font-mono text-sm">
+              {tech}
+            </span>
+          ))
+        }
       </div>
 
       {
         socials.length > 0 && (
           <div class="mt-5 flex max-sm:flex-col sm:items-center">
-            <div class="me-2 mb-1 whitespace-nowrap sm:mb-0 text-sm text-foreground/60">
+            <div class="text-foreground/60 me-2 mb-1 text-sm whitespace-nowrap sm:mb-0">
               {t.home.socialLinks}:
             </div>
             <Socials />
@@ -130,7 +139,7 @@ const techStack = ["Java", "Kotlin", "Spring Boot", "DDD", "PostgreSQL", "Docker
     {
       uniqueTags.length > 0 && (
         <section id="tags" class="pt-12 pb-8">
-          <h2 class="text-2xl font-semibold tracking-wide mb-4">
+          <h2 class="mb-4 text-2xl font-semibold tracking-wide">
             {t.nav.tags}
           </h2>
           <ul class="flex flex-wrap gap-x-6 gap-y-3">
