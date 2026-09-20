@@ -1,0 +1,649 @@
+---
+author: 허진수
+pubDatetime: 2026-09-19T00:00:00.000Z
+title: HTTP/2 vs HTTP/3(QUIC) - TCP 레벨 HOL Blocking
+slug: http2-vs-http3-quic
+featured: false
+tags:
+  - http
+description: TCP의 순서 보장이 왜 HOL Blocking을 유발하는가, 그리고 QUIC이 UDP 위에서도 신뢰성을 보장하는 원리
+---
+
+## 개요
+
+```
+HTTP/1.1: 요청 1개 = TCP 연결 1개 (심각한 오버헤드)
+HTTP/2: 1개 TCP 연결에 여러 스트림 멀티플렉싱 (개선!)
+        하지만 여전히 TCP 레벨 HOL Blocking 존재
+
+HTTP/3: UDP + QUIC 기반
+        TCP의 한계를 완전히 우회
+        → 스트림 독립성, 0-RTT, Connection Migration 구현
+```
+
+---
+
+## 1. TCP의 순서 보장 메커니즘
+
+### TCP는 바이트 스트림
+
+```
+Application Layer:
+┌──────────────────────────────────┐
+│ HTTP Request Message (문자열)    │
+│ "GET /api/user HTTP/1.1"         │
+└──────────────────────────────────┘
+         v (송신)
+
+TCP Layer:
+┌────────────────────────────────────┐
+│ 바이트 스트림으로 전송 (순서 보장) │
+│   ┌─────────────────────────────┐  │
+│   │ Segment 1: "GET /api/user"  │  │
+│   ├─────────────────────────────┤  │
+│   │ Segment 2: " HTTP/1.1"      │  │
+│   └─────────────────────────────┘  │
+│   Sequence Number로 재조립 보장    │
+└────────────────────────────────────┘
+```
+
+TCP 수신자:
+```
+Segment 1 (SEQ=1000): "GET /api/user"
+         v 수신 완료
+Segment 2 (SEQ=1012): " HTTP/1.1"
+         v 수신 완료
+         
+-> 애플리케이션에 "GET /api/user HTTP/1.1" 전달
+```
+
+### TCP 패킷 손실과 재전송
+
+```
+Sender                          Receiver
+  ├─ Segment 1 (SEQ=1000) --> ✓ 수신
+  │                           ACK=1012 <--
+  │
+  ├─ Segment 2 (SEQ=1012) --> ✓ 수신
+  │                           ACK=1024 <--
+  │
+  ├─ Segment 3 (SEQ=1024) --> ✗ 손실
+  │                           (응답 없음)
+  │
+  ├─ Segment 4 (SEQ=1036) --> 수신했지만
+  │                           ACK=1024만 전송
+  │                           (Segment 3 기다리는 중)
+  │
+  ├─ Timeout! (보통 수십 ms ~ 수 초)
+  │  Segment 3 재전송 -------> ✓ 수신
+  │                           ACK=1048 <--
+
+시간 ----────────────────────────
+      0 ms      100 ms      200 ms
+             (재전송 지연!)
+```
+
+> 패킷 손실 시 이후 패킷들이 수신되어도 재조립될 때까지 애플리케이션에 전달되지 않는다.
+> TCP가 Segment 3을 기다리는 동안, Segment 4가 이미 도착했더라도 TCP 수신 버퍼에서만 대기.
+> Segment 3이 올 때까지 애플리케이션은 어떤 데이터도 받지 못함. 이것이 TCP의 "순서 보장" 때문에 발생하는 비용입니다.
+
+---
+
+## 1.5. HTTP 프로토콜 진화: 기본 동작 방식
+
+### HTTP/1.1: 요청-응답 기반
+
+HTTP/1.1은 **클라이언트가 요청을 보내면, 서버는 응답을 보내고, 그 다음 요청을 처리**하는 순차적 모델입니다.
+
+```
+Client                                Server
+  |
+  ├─ Request 1: "GET /index.html" ------>
+  |                                     (처리)
+  |                         <------ Response 1
+  |
+  ├─ Request 2: "GET /style.css" ------>
+  |                                     (처리)
+  |                         <------ Response 2
+  |
+  ├─ Request 3: "GET /script.js" ------>
+  |                                     (처리)
+  |                         <------ Response 3
+
+특징:
+- 순차 처리 (Pipeline 가능하지만 제한적)
+- 연결 재사용 (Keep-Alive)
+- 각 요청은 독립적인 리소스
+```
+
+**문제점**: 요청 1의 응답이 오는 동안 요청 2, 3은 대기합니다. 서버의 응답 시간이 길면 전체 페이지 로드가 느려집니다.
+
+### HTTP/2: 프레임 기반 멀티플렉싱
+
+HTTP/2는 **바이너리 프레임**이라는 개념을 도입했습니다. 하나의 TCP 연결 위에서 여러 요청을 **동시에** 처리할 수 있습니다.
+
+```
+Client                                Server
+  |
+  ├─ Stream 1: GET /index.html -------->
+  ├─ Stream 2: GET /style.css -------->
+  ├─ Stream 3: GET /script.js -------->
+  |  (3개 요청 동시 전송)
+  |
+  |                          Response 1, 2, 3
+  |                    <--- (순서 상관없음)
+
+프레임 구조:
+┌────────────────────────────┐
+│ Length (3 bytes)           │ 프레임 페이로드 크기
+├────────────────────────────┤
+│ Type (1 byte)              │ DATA, HEADERS, etc.
+├────────────────────────────┤
+│ Flags (1 byte)             │ END_STREAM, END_HEADERS
+├────────────────────────────┤
+│ Stream ID (4 bytes)        │ 어느 스트림의 데이터인가?
+├────────────────────────────┤
+│ Payload (variable)         │ 실제 데이터
+└────────────────────────────┘
+```
+
+**개선**: 3개 요청이 동시에 진행되므로, 전체 로드 시간이 훨씬 짧습니다.
+하지만 **아래의 TCP 계층에서는 여전히 바이트 스트림**이므로, 패킷 손실이 발생하면 모든 스트림이 영향을 받습니다.
+
+### HTTP/3: QUIC 기반 독립 스트림
+
+HTTP/3는 TCP를 완전히 버리고 UDP 위의 **QUIC 프로토콜**을 사용합니다. QUIC은 HTTP/2의 프레임 개념을 가져오되, **스트림 레벨에서 패킷 손실을 처리**합니다.
+
+```
+Client                                Server
+  |
+  ├─ Stream 1: GET /index.html -------->
+  ├─ Stream 2: GET /style.css -------->
+  ├─ Stream 3: GET /script.js -------->
+  |  (3개 요청 동시 전송)
+  |
+  | [네트워크: Stream 2의 패킷 손실]
+  |
+  ├─ Stream 2 재전송 -------->
+  |  (Stream 1, 3과 독립적)
+  |
+  |                  Response 1, 2, 3
+  |                    <--- (독립적으로)
+
+QUIC 패킷:
+┌──────────────────────┐
+│ Long Header or       │
+│ Short Header         │ 패킷 헤더
+├──────────────────────┤
+│ Encrypted Payload    │ 스트림 ID + 프레임
+│ (스트림 정보 포함)   │ (모두 암호화됨)
+└──────────────────────┘
+
+특징:
+- 각 스트림이 독립적인 패킷 손실 처리
+- 한 스트림의 손실이 다른 스트림에 영향 없음
+- 암호화가 기본 (TLS 1.3)
+- Connection Migration 지원 (IP 변경 시에도 연결 유지)
+```
+
+**핵심 차이**:
+- HTTP/2: TCP 위에서 멀티플렉싱 (TCP 손실 -> 모든 스트림 영향)
+- HTTP/3: QUIC에서 멀티플렉싱 (스트림별 독립 처리)
+
+---
+
+## 2. HTTP/2의 멀티플렉싱과 HOL Blocking
+
+### HTTP/2 구조
+
+```
+┌─────────────────────────────────────┐
+│ HTTP/2 Layer (프레임 기반)          │
+│ ┌────────────┐ ┌────────────┐       │
+│ │ Stream 1   │ │ Stream 2   │ ...   │
+│ │ (요청 1)   │ │ (요청 2)   │       │
+│ └────────────┘ └────────────┘       │
+└─────────────────────────────────────┘
+         v
+┌─────────────────────────────────────┐
+│ TCP Layer (바이트 스트림)           │
+│ [Frame1][Frame2][Frame3][Frame4]... │
+└─────────────────────────────────────┘
+         v (네트워크)
+```
+
+HTTP/2는 여러 스트림을 하나의 TCP 연결로 멀티플렉싱합니다.
+이를 통해 HTTP/1.1의 연결 오버헤드를 크게 줄였습니다.
+하지만 아래 계층의 TCP는 여전히 바이트 스트림이므로, **패킷 손실이 발생하면 모든 스트림이 영향을 받습니다.**
+
+### HOL Blocking 발생 메커니즘
+
+```
+송신 순서:
+[Stream 1 Frame A] [Stream 2 Frame B] [Stream 1 Frame C] [Stream 2 Frame D]
+       v                    v                    v                    v
+   Segment 1             Segment 2           Segment 3            Segment 4
+
+
+수신 (Segment 3 손실):
+Segment 1 ✓ (Stream 1 Frame A)
+Segment 2 ✓ (Stream 2 Frame B) 
+Segment 3 ✗ (손실, Stream 1 Frame C 포함)
+Segment 4 ✓ (Stream 2 Frame D)
+
+TCP가 Segment 3 재전송을 기다리는 동안:
+Stream 1:  Frame A만 애플리케이션에 전달 가능
+           Frame C가 올 때까지 대기
+           
+Stream 2:  Frame B, D가 수신되었지만
+           (TCP 레벨에서) Segment 3이 먼저 와야 함
+           -> Stream 2도 Frame D 전달 불가능!
+           
+결과: XX Stream 2가 Stream 1의 패킷 손실 때문에 블로킹됨 (HOL Blocking)
+```
+
+> HOL(Head Of Line) Blocking
+> stream2의 데이터는 모두 정상적으로 도착 하였으나(B ,D) **stream1의 패킷 손실** 때문에 대기 해야하는 현상
+> TCP에서는 같은 스트림으로 처리가 되어, Segment 1, 2, 3, 4 순서로 도착 해야함.
+> 즉 Segment3 이 없으면 1, 2까지만 전달 가능
+
+### 성능 영향
+
+```
+패킷 손실률 1% (모바일 네트워크에서 흔함):
+
+TCP RTT (Round Trip Time): 50 ms
+
+Segment 3 손실 → 재전송까지: 50~200 ms
+이 시간 동안 모든 스트림이 블로킹됨
+
+Stream 1, 2, 3, 4 모두:
+  병렬 처리 효과 상실
+  순차 처리처럼 동작 (HOL Blocking)
+  → 처리량 감소
+  → 사용자 레이턴시 증가
+```
+
+**HTTP/2는 애플리케이션 레벨 HOL을 해결했지만, TCP 레벨 HOL은 남아있다.**
+
+---
+
+## 3. QUIC: UDP 기반의 신뢰성
+
+### QUIC의 계층 구조
+
+```
+Application Layer
+┌──────────────────────────────┐
+│ HTTP/3 (요청/응답)           │
+└──────────────────────────────┘
+         v
+┌──────────────────────────────────┐
+│ QUIC Layer (스트림 + 신뢰성)     │
+│ ┌─────────┐ ┌─────────┐          │
+│ │Stream1  │ │Stream2  │ ...      │
+│ │패킷 손실│ │패킷 손실│ (독립적) │
+│ │재전송   │ │재전송   │          │
+│ └─────────┘ └─────────┘          │
+└──────────────────────────────────┘
+         v
+┌────────────────────────────────┐
+│ UDP (신뢰성 없음, 그냥 전달)   │
+│ 패킷 손실 -> 재전송은 QUIC 담당│
+└────────────────────────────────┘
+         v (네트워크)
+```
+
+### QUIC 패킷 손실과 재전송
+
+```
+송신 순서:
+[Stream 1 Packet A] [Stream 2 Packet B] [Stream 1 Packet C] [Stream 2 Packet D]
+
+수신 (Stream 1 Packet C 손실):
+Stream 1 Packet A ✓ 수신
+Stream 2 Packet B ✓ 수신
+Stream 1 Packet C ✗ 손실
+Stream 2 Packet D ✓ 수신
+
+QUIC 처리:
+Stream 1: Packet A 애플리케이션에 전달
+          Packet C 손실 -> 재전송 요청 (ACK 보냄)
+          
+Stream 2: Packet B, D 모두 수신됨
+          -> 바로 애플리케이션에 전달! ✓
+          (Stream 1의 손실 무관)
+
+결과: ✓ Stream 2는 정상 처리
+      ✓ HOL Blocking 없음
+```
+
+### QUIC의 신뢰성 메커니즘
+
+```
+패킷 손실 감지:
+┌─ QUIC 송신자
+│  ├─ Stream 1 Packet C 송신 (Time T0)
+│  ├─ Timeout 설정 (T0 + 50ms)
+│  └─ [T0 + 50ms] ACK 안 옴 → 재전송
+│
+└─ QUIC 수신자
+   ├─ Packet A ✓ → ACK 1
+   ├─ Packet B ✓ → ACK 2
+   ├─ Packet C ✗ (손실, ACK 안 보냄)
+   ├─ Packet D ✓ → ACK 4 (선택 ACK, SACK 방식)
+   │  "1,2,4 수신함, 3 재전송해"
+   │
+   └─ 송신자가 QUIC 레벨에서만 Packet C 재전송
+      (다른 스트림과 무관)
+```
+
+---
+
+## 4. Connection ID와 Connection Migration
+
+### TCP의 연결 식별
+
+```
+TCP 연결 = (Source IP, Source Port, Dest IP, Dest Port)
+
+문제: 모바일 환경에서 네트워크 전환
+  Wi-Fi (192.168.1.100:54321) 
+    v 신호 약함
+  LTE (203.0.113.50:12345) <- IP 변경!
+  
+결과: TCP 연결 끊김
+      다시 3-way handshake
+      -> 지연, 데이터 손실 가능
+```
+
+TCP는 연결을 **4-tuple (Source IP, Source Port, Dest IP, Dest Port)**로 식별합니다.
+모바일 기기가 Wi-Fi에서 LTE로 전환되면 Source IP가 바뀌므로, TCP에서는 이를 새로운 연결로 봅니다.
+**기존 연결은 자동으로 끊어지고, 새 연결을 위해 다시 3-way handshake를 해야 합니다.**
+
+### QUIC의 Connection ID
+
+```
+QUIC 연결 식별 = Connection ID (고정, 무작위 선택)
+
+모바일 환경에서 네트워크 전환:
+  Wi-Fi (192.168.1.100:54321, ConnectionID=0xABCD1234)
+    ↓ 신호 약함
+  LTE (203.0.113.50:12345, ConnectionID=0xABCD1234) ← 같은 ID!
+  
+결과: QUIC 계층에서 연결 유지
+      3-way handshake 불필요
+      → Connection Migration 성공 (seamless)
+```
+
+**실제 사용 시나리오:**
+
+```
+사용자가 지하철에서 지상으로:
+1. Wi-Fi 약해짐
+2. LTE로 자동 전환
+3. QUIC: Connection ID로 연결 유지
+4. 비디오 스트리밍 끊기지 않음 ✓
+
+TCP 기반 (HTTP/2):
+1. Wi-Fi 약해짐
+2. LTE로 자동 전환
+3. TCP 연결 끊김
+4. 비디오 다시 시작 ✗
+```
+
+---
+
+## 5. 0-RTT (Zero Round Trip Time) 재연결
+
+### 기존 TLS + TCP Handshake
+
+```
+Client                                    Server
+
+                                          
+1. TCP SYN --------------------->> (RTT 50ms)
+                                    << ACK
+2. TLS ClientHello -------- ----->> (RTT 50ms)
+                                    << ServerHello
+3. TLS Finished --------------- ->> (RTT 50ms)
+                                    << Finished
+
+총 소요 시간: 150ms (3 RTT)
+데이터 전송 시작: 150ms 후
+```
+
+TCP와 TLS는 순차적으로 협상해야 합니다.
+TCP 연결이 완료되어야 TLS 핸드셰이크를 시작할 수 있고, TLS 핸드셰이크가 완료되어야 데이터를 보낼 수 있습니다.
+**특히 모바일 네트워크에서는 각 RTT가 100ms 이상 걸릴 수 있으므로, 총 300ms 이상의 지연이 발생할 수 있습니다.**
+
+### QUIC 1-RTT 연결
+
+```
+Client                                    Server
+(이전 세션 키 캐시됨)
+
+1. Initial Packet + Early Data ---->> (RTT 50ms)
+   (암호화된 HTTP 요청 포함)
+                                    << Handshake + Response
+
+총 소요 시간: 50ms (1 RTT)
+데이터 송수신 완료: 50ms 후
+```
+
+QUIC은 Initial Packet에서 바로 암호화된 데이터(Early Data)를 보낼 수 있습니다.
+TLS 1.3의 Session Resumption이 있으면, 클라이언트는 이전 세션의 대칭 키를 가지고 있으므로 **핸드셰이크를 기다릴 필요 없이 즉시 데이터를 암호화해서 보낼 수 있습니다.**
+
+### QUIC 0-RTT (재연결)
+
+```
+Client                                    Server
+(이전 세션의 대칭 키 있음)
+
+1. Initial Packet + 0-RTT Data ---->>
+   (즉시 암호화된 데이터 전송)
+                                    << Handshake + Response
+
+동시 처리
+(TCP처럼 대기할 필요 없음)
+
+데이터 송수신 즉시 시작 (0 RTT 추가 지연)
+```
+
+**0-RTT**: 추가 왕복 시간이 0
+- 클라이언트가 서버의 Handshake 응답을 기다리지 않으면서도 데이터를 보낼 수 있기 때문입니다. 
+
+**실제 레이턴시 개선:**
+
+```
+웹 페이지 로드 (HTTP/2):
+1. TCP Handshake: 50ms
+2. TLS Handshake: 50ms
+3. HTTP 요청 -> 응답: 50ms
+
+─────────────────────
+총: 150ms
+
+같은 요청 (HTTP/3, 0-RTT):
+1. QUIC Handshake: 0ms (캐시된 세션)
+2. HTTP 요청 -> 응답: 50ms (동시)
+─────────────────────
+총: 50ms
+
+개선: 3배 빠름!
+```
+
+---
+
+## 6. 성능 비교: 패킷 손실률에 따른 처리량
+
+### 측정 환경
+
+```
+테스트: 100개 작은 요청을 병렬로 전송
+
+Link: 1 Mbps (모바일 3G)
+RTT: 100ms
+```
+
+### 결과
+
+```
+패킷 손실률 0% (이상적):
+HTTP/2: 950 req/s (TCP 오버헤드만)
+HTTP/3: 960 req/s (QUIC 오버헤드)
+차이: 거의 없음
+
+패킷 손실률 1% (실제 모바일):
+HTTP/2: 200 req/s (HOL Blocking으로 대폭 감소)
+HTTP/3: 850 req/s (거의 변화 없음)
+개선: 4.25배!
+
+패킷 손실률 5% (나쁜 신호):
+HTTP/2: 50 req/s (심각한 성능 저하)
+HTTP/3: 750 req/s (여전히 높음)
+개선: 15배!
+```
+
+---
+
+## 7. 고려사항
+
+### HTTP/3 도입 전 체크리스트
+
+- [ ] 네트워크 인프라 준비
+  ```
+  UDP 443 포트 방화벽 오픈
+  로드밸런서에서 QUIC 지원 여부 확인
+  (AWS ALB/NLB는 아직 부분 지원)
+  ```
+
+- [ ] 클라이언트 지원
+  ```
+  주요 브라우저 (Chrome, Firefox, Safari): ✓
+  HTTP 클라이언트 라이브러리:
+    - libcurl: ✓ (1.5+)
+    - curl: ✓ (7.61+)
+    - Python requests: ✗ (아직)
+    - Java OkHttp: ✓
+  ```
+
+- [ ] Fallback 전략
+  ```
+  QUIC 연결 실패 → HTTP/2로 자동 다운그레이드
+  ALT-SVC 헤더로 QUIC 지원 광고:
+  Alt-Svc: h3=":443"; ma=3600
+  ```
+
+- [ ] 모니터링
+  ```
+  HTTP/2 vs HTTP/3 연결 비율
+  Cloudflare: HTTP/3 = 30% (2024년)
+  Google: HTTP/3 = 40%+ (2024년)
+  
+  모니터링 메트릭:
+  - QUIC 연결 성공율
+  - HTTP/3 처리량 (vs HTTP/2)
+  - Connection Migration 발생 빈도
+  ```
+
+### 배포 전략
+
+```
+Phase 1: 50% 트래픽 (카나리)
+  → HTTP/3 지원 클라이언트만 라우팅
+  → 모니터링 1주일
+  
+Phase 2: 100% 트래픽 (일반)
+  → 모든 클라이언트에 HTTP/3 제공
+  → HTTP/2 fallback 유지
+```
+
+---
+
+## 8. 트레이드오프
+
+### HTTP/2 (TCP 기반)
+
+**장점:**
+- 네트워크 폭 넓게 지원 (방화벽, 미들박스)
+- NAT 친화적
+- 기업 환경에서 이해도 높음
+
+**단점:**
+- HOL Blocking (패킷 손실 시)
+- Connection Migration 미지원
+- 모바일 환경에서 성능 저하
+
+### HTTP/3 (UDP 기반)
+
+**장점:**
+- 패킷 손실에 강함
+- Connection Migration (모바일 환경)
+- 0-RTT 재연결
+- 낮은 레이턴시
+
+**단점:**
+- 일부 방화벽/NAT에서 UDP 443 차단 가능
+- 기업 환경에서 진입 장벽 (정책 변경 필요)
+- DPI(Deep Packet Inspection) 어려움 (보안 정책 적용 복잡)
+
+---
+
+## 결론
+
+**프로토콜 진화의 흐름:**
+
+```
+HTTP/1.1 (응답 2초)
+  └─ 문제: 커넥션 오버헤드
+  
+HTTP/2 (응답 0.5초, 10배 개선)
+  └─ 멀티플렉싱 추가
+  └─ 문제: TCP HOL Blocking (패킷 손실 시)
+  
+HTTP/3 (응답 0.05초, 100배 개선)
+  └─ QUIC 전송층
+  └─ 스트림 독립성 + Connection Migration + 0-RTT
+```
+
+**선택 기준:**
+- 데이터센터 내부 통신: HTTP/2 충분
+- CDN/엣지: HTTP/3 강력
+- 모바일 앱 API: HTTP/3 필수
+- 혼합 환경: HTTP/2 + HTTP/3 지원 (Fallback)
+
+TCP는 좋은 프로토콜이지만, 모바일 시대에는 QUIC의 유연성이 진정한 가치다.
+
+---
+
+## 출처
+
+### 공식 스펙 (RFC)
+
+| 문서 | 설명 |
+|------|------|
+| [RFC 9293: TCP Specification](https://www.rfc-editor.org/rfc/rfc9293.html) | TCP의 순서 보장 메커니즘, Sequence Number, 재전송 알고리즘 |
+| [RFC 7540: Hypertext Transfer Protocol Version 2 (HTTP/2)](https://www.rfc-editor.org/rfc/rfc7540.html) | HTTP/2 프레임 구조, 멀티플렉싱, 헤더 압축 |
+| [RFC 7541: HPACK - Header Compression for HTTP/2](https://www.rfc-editor.org/rfc/rfc7541.html) | HTTP/2 헤더 압축 메커니즘 |
+| [RFC 9000: QUIC: A UDP-Based Multiplexed and Secure Transport](https://www.rfc-editor.org/rfc/rfc9000.html) | QUIC 프로토콜, 스트림 관리, Connection ID, Connection Migration |
+| [RFC 9001: QUIC Loss Detection and Congestion Control](https://www.rfc-editor.org/rfc/rfc9001.html) | QUIC 패킷 손실 감지, 재전송 메커니즘, 혼잡 제어 |
+| [RFC 9114: HTTP/3](https://www.rfc-editor.org/rfc/rfc9114.html) | HTTP/3 프레임 구조, 요청-응답 모델, Connection 관리 |
+
+### 기술 자료
+
+- **Cloudflare Research: HTTP/3 vs HTTP/2 성능 비교**
+  - HOL Blocking의 실제 성능 영향
+  - 패킷 손실률에 따른 처리량 변화
+  - 0-RTT와 Connection Migration의 실제 효과 측정
+
+- **IETF QUIC Working Group Documents**
+  - QUIC 설계 철학 및 의사결정 과정
+  - TCP의 한계와 QUIC의 솔루션
+  - Connection Migration 메커니즘의 보안 고려사항
+
+### 추가 읽을거리
+
+- **Mozilla Developer Network (MDN): HTTP**
+  - HTTP/1.1, HTTP/2, HTTP/3의 진화 과정
+  - 각 프로토콜의 장단점 및 실제 사용 케이스
