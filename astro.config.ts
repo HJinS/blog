@@ -1,7 +1,6 @@
 import {
   defineConfig,
   envField,
-  fontProviders,
   svgoOptimizer,
 } from "astro/config";
 import tailwindcss from "@tailwindcss/vite";
@@ -51,7 +50,6 @@ export default defineConfig({
       themes: { light: "min-light", dark: "night-owl" },
       defaultColor: false,
       wrap: false,
-      preserveTrailingWhitespace: true,
       transformers: [
         transformerFileName({ style: "v2", hideDot: false }),
         transformerNotationHighlight(),
