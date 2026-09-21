@@ -7,8 +7,8 @@
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
   --color-border: var(--border);
-  --font-app: var(--font-google-sans-code);
-  --font-code: var(--font-google-sans-code), var(--font-nanum-gothic-coding);
+  --font-app: "D2Coding", monospace;
+  --font-code: "D2Coding", monospace;
 }
 
 /* Light theme values */

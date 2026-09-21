@@ -98,6 +98,10 @@
   /* ===== Code Blocks & Syntax Highlighting ===== */
   .astro-code {
     @apply outline-border font-code flex border bg-(--shiki-light-bg) text-(--shiki-light) [&_span]:text-(--shiki-light);
+    font-family: "D2Coding", monospace !important;
+    font-size: 12px;
+    tab-size: 4;
+    white-space: pre-wrap !important;
   }
 
   html[data-theme="dark"] .astro-code {

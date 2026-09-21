@@ -1,9 +1,9 @@
 import type { APIRoute } from "astro";
 import { getCollection } from "astro:content";
-import { fontData, experimental_getFontFileURL } from "astro:assets";
 import satori from "satori";
 import sharp from "sharp";
-import { getFontPathByWeight } from "@/utils/getFontPathByWeight";
+import fs from "fs";
+import path from "path";
 import { getPostSlug } from "@/utils/getPostPaths";
 import config from "@/config";
 
@@ -22,26 +22,17 @@ export async function getStaticPaths() {
   }));
 }
 
-export const GET: APIRoute = async ({ props, url }) => {
+export const GET: APIRoute = async ({ props }) => {
   if (!config.features.dynamicOgImage) {
     return new Response(null, { status: 404, statusText: "Not found" });
   }
 
-  const fonts = fontData["--font-google-sans-code"];
-  const regularFontPath = getFontPathByWeight(fonts, 400);
-  const boldFontPath = getFontPathByWeight(fonts, 700);
-
-  if (regularFontPath === undefined || boldFontPath === undefined) {
-    throw new Error("Cannot find the font path.");
-  }
+  const regularPath = path.resolve("./public/fonts/D2Coding-Regular.ttf");
+  const boldPath = path.resolve("./public/fonts/D2Coding-Bold.ttf");
 
   const [regularData, boldData] = await Promise.all([
-    fetch(experimental_getFontFileURL(regularFontPath, url)).then(res =>
-      res.arrayBuffer()
-    ),
-    fetch(experimental_getFontFileURL(boldFontPath, url)).then(res =>
-      res.arrayBuffer()
-    ),
+    fs.promises.readFile(regularPath),
+    fs.promises.readFile(boldPath),
   ]);
 
   const svg = await satori(
@@ -173,13 +164,13 @@ export const GET: APIRoute = async ({ props, url }) => {
       embedFont: true,
       fonts: [
         {
-          name: "Google Sans Code",
+          name: "D2Coding",
           data: regularData,
           weight: 400,
           style: "normal",
         },
         {
-          name: "Google Sans Code",
+          name: "D2Coding",
           data: boldData,
           weight: 700,
           style: "normal",

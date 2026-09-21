@@ -15,6 +15,7 @@ import {
   transformerNotationDiff,
   transformerNotationHighlight,
   transformerNotationWordHighlight,
+  transformerRenderWhitespace,
 } from "@shikijs/transformers";
 import { transformerFileName } from "./src/utils/transformers/fileName";
 import { remarkMermaid } from "./src/utils/remarkMermaid";
@@ -50,46 +51,24 @@ export default defineConfig({
       themes: { light: "min-light", dark: "night-owl" },
       defaultColor: false,
       wrap: false,
+      preserveTrailingWhitespace: true,
       transformers: [
         transformerFileName({ style: "v2", hideDot: false }),
         transformerNotationHighlight(),
         transformerNotationWordHighlight(),
         transformerNotationDiff({ matchAlgorithm: "v3" }),
+        transformerRenderWhitespace({
+          position: "all",
+          classSpace: "space",
+          classTab: "tab",
+        }),
       ],
     },
   },
   vite: {
     plugins: [tailwindcss()],
   },
-  fonts: [
-    {
-      name: "Google Sans Code",
-      cssVariable: "--font-google-sans-code",
-      provider: fontProviders.google(),
-      fallbacks: ["monospace"],
-      weights: [300, 400, 500, 600, 700],
-      styles: ["normal", "italic"],
-      formats: ["woff", "ttf"],
-    },
-    {
-      name: "Noto Sans KR",
-      cssVariable: "--font-noto-sans-kr",
-      provider: fontProviders.google(),
-      fallbacks: ["sans-serif"],
-      weights: [400, 700],
-      styles: ["normal"],
-      formats: ["woff", "ttf"],
-    },
-    {
-      name: "Nanum Gothic Coding",
-      cssVariable: "--font-nanum-gothic-coding",
-      provider: fontProviders.google(),
-      fallbacks: ["monospace"],
-      weights: [400, 700],
-      styles: ["normal"],
-      formats: ["woff", "ttf"],
-    },
-  ],
+  fonts: [],
   env: {
     schema: {
       PUBLIC_GOOGLE_SITE_VERIFICATION: envField.string({
