@@ -1,0 +1,85 @@
+---
+import { getCollection } from "astro:content";
+import { getRelativeLocaleUrl } from "astro:i18n";
+import { getCategoryTree } from "@/utils/getUniqueCategories";
+import { stripBase, stripLocale } from "@/utils/withBase";
+import { useTranslations } from "@/i18n";
+import config from "@/config";
+
+const locale = Astro.currentLocale ?? config.site.lang;
+const t = useTranslations(locale);
+
+const posts = await getCollection("posts", ({ data }) => !data.draft);
+const tree = getCategoryTree(posts);
+
+// Only `/categories/<group>/<sub>` and `/posts/<group>/<sub>/<slug>` carry the
+// category in their URL, so only those highlight an entry.
+const currentPath = stripLocale(stripBase(Astro.url.pathname), locale);
+const [section, activeGroup, activeSub] = currentPath.split("/").filter(Boolean);
+const hasCategory = section === "categories" || section === "posts";
+
+const isGroupActive = (group: string) => hasCategory && group === activeGroup;
+const isSubActive = (group: string, sub: string) =>
+  isGroupActive(group) && sub === activeSub;
+
+const linkClass =
+  "hover:text-accent block py-0.5 transition-colors focus-visible:text-accent";
+---
+
+{
+  tree.length > 0 && (
+    <nav
+      aria-label={t.nav.categories}
+      class="fixed top-32 right-[calc(50%+24rem+1.5rem)] hidden max-h-[calc(100svh-10rem)] w-52 overflow-y-auto text-base xl:block"
+    >
+      <a
+        href={getRelativeLocaleUrl(locale, "categories")}
+        class="hover:text-accent mb-3 block text-lg font-semibold"
+      >
+        {t.nav.categories}
+      </a>
+      <ul class="space-y-4">
+        {tree.map(({ group, count, subs }) => (
+          <li>
+            <a
+              href={getRelativeLocaleUrl(locale, `categories/${group}/`)}
+              aria-current={isGroupActive(group) && !activeSub ? "page" : undefined}
+              class:list={[
+                linkClass,
+                "font-medium",
+                { "text-accent": isGroupActive(group) },
+              ]}
+            >
+              {group}
+              <span class="opacity-60">({count})</span>
+            </a>
+            {subs.length > 0 && (
+              <ul class="border-border mt-1 ms-1 border-s ps-3">
+                {subs.map(({ sub, count }) => (
+                  <li>
+                    <a
+                      href={getRelativeLocaleUrl(
+                        locale,
+                        `categories/${group}/${sub}/`
+                      )}
+                      aria-current={
+                        isSubActive(group, sub) ? "page" : undefined
+                      }
+                      class:list={[
+                        linkClass,
+                        { "text-accent font-medium": isSubActive(group, sub) },
+                      ]}
+                    >
+                      {sub}
+                      <span class="opacity-60">({count})</span>
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </li>
+        ))}
+      </ul>
+    </nav>
+  )
+}

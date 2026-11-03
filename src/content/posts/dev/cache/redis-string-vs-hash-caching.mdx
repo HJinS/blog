@@ -1,0 +1,502 @@
+---
+author: 허진수
+pubDatetime: 2026-09-09T00:00:00.000Z
+title: "Redis 캐싱 전략: String Blob vs Hash 자료구조 선택"
+slug: redis-string-vs-hash-caching
+featured: false
+tags:
+  - redis
+  - caching
+  - database
+  - architecture
+  - performance
+description: 24MB 문자열 vs Hash 필드 부분 조회 — 메모리, 네트워크 대역폭, 캐시 히트율을 고려한 Redis 자료구조 선택과 TTL 전략
+---
+
+## 개요
+
+배달 플랫폼의 배차 시스템에서 "실거리 캐싱"을 설계할 때 두 가지 선택지가 있었다.
+
+```
+옵션 1: String Blob (JSON 문자열)
+pickup_location_1 = '{"coord": [...], "routes": [...]}'  (24 MB)
+↓
+조회: GET pickup_location_1
+문제: 24 MB 전체 다운로드 필수 (1개 좌표만 필요해도)
+
+옵션 2: Hash 자료구조
+pickup_hash = {
+  location_1_to_2: "5.3km",
+  location_1_to_3: "6.1km",
+  ...
+}
+↓
+조회: HGET pickup_hash location_1_to_2
+개선: 필요한 필드만 다운로드
+```
+
+결과: **String → Hash 전환으로 네트워크 대역폭 수십%까지 절감 가능**
+
+---
+
+## 1. 메모리 오버헤드 비교
+
+### Redis 내부 메모리 구조
+
+Redis의 모든 자료구조는 내부적으로 **RedisObject** + **실제 데이터**로 구성된다.
+
+```
+┌─────────────────────────────────────────┐
+│ RedisObject (메타정보)                   │
+├─────────────────────────────────────────┤
+│ - type (string/hash/list...)            │
+│ - encoding (raw/embstr/ht/...)          │
+│ - refcount                              │
+│ - lru (TTL 관련)                        │
+├─────────────────────────────────────────┤
+│ 실제 데이터 (인코딩에 따라 다름)         │
+└─────────────────────────────────────────┘
+```
+
+### String 메모리 계산
+
+```
+Key: "pickup_location_1"
+Value: (24 MB JSON 문자열)
+
+메모리 = RedisObject (64 bytes)
+       + Key 문자열 (64 bytes)
+       + Value 문자열 (24 MB + 64 bytes 오버헤드)
+       ────────────────────────
+       ≈ 24 MB + 192 bytes
+```
+
+### Hash 메모리 계산
+
+같은 데이터를 Hash로 저장:
+
+```
+Key: "pickup_hash"
+Fields: {
+  "location_1_to_2": "5.3km",
+  "location_1_to_3": "6.1km",
+  ...  (수천 개 필드)
+}
+
+메모리 = RedisObject (64 bytes)
+       + Key 문자열 (64 bytes)
+       + Hash 엔트리 테이블 (매 필드마다 ~100 bytes)
+       + 각 필드 Key (평균 ~30 bytes)
+       + 각 필드 Value (평균 ~10 bytes)
+       ────────────────────────────────
+```
+
+**예시 계산** (10,000개 필드, 지역 ID):
+
+```
+String 방식:
+24 MB JSON 블롭 × 1개 = 24 MB
+
+Hash 방식:
+- RedisObject: 64 bytes
+- 엔트리 테이블 오버헤드: 10,000 × 100 bytes ≈ 1 MB
+- 각 필드명 ("region_123_to_456"): 10,000 × 30 bytes ≈ 300 KB
+- 각 필드값 ("5.3km"): 10,000 × 10 bytes ≈ 100 KB
+─────────────────────────────
+≈ 1.4 MB (String 방식 대비 94% 절감!)
+```
+
+### 인코딩 최적화: Ziplist vs Hashtable
+
+Redis의 Hash는 필드 수에 따라 자동으로 인코딩을 전환한다.
+
+```
+hash-max-ziplist-entries: 512  (기본값)
+hash-max-ziplist-value: 64     (바이트, 기본값)
+
+필드 수 < 512 && 모든 필드값 < 64 bytes
+  → ziplist 인코딩 (연속 메모리, 캐시 친화적)
+  → 매우 효율적 메모리
+
+필드 수 >= 512 || 어떤 필드값 >= 64 bytes
+  → hashtable 인코딩 (포인터 배열)
+  → 해시 탐색 O(1)이지만 메모리 단편화
+```
+
+실거리 캐싱의 경우:
+- 필드명: "region_123_to_456" (~20 bytes)
+- 필드값: "5.3km" (~10 bytes)
+- 필드 수: 수천~수만 개
+
+**결론**: hashtable 인코딩이 필요하고, Hash의 메모리 효율은 여전히 String 대비 훨씬 낫다.
+
+---
+
+## 2. 네트워크 대역폭 분석
+
+### 프로토콜 레벨: RESP (REdis Serialization Protocol)
+
+Redis 클라이언트-서버 통신은 RESP 형식으로 인코딩된다.
+
+**GET 명령 응답 (String):**
+
+```
+GET pickup_location_1
+
+RESP 응답:
+$24000000\r\n           (크기: 24MB)
+{"coord": [...]}...\r\n (실제 24MB 데이터)
+```
+
+**HGET 명령 응답 (Hash):**
+
+```
+HGET pickup_hash location_1_to_2
+
+RESP 응답:
+$10\r\n       (크기: 10 바이트)
+5.3km\r\n     (실제 데이터 10 바이트)
+```
+
+### 네트워크 트래픽 계산
+
+**시나리오**: 배달 매칭 시스템이 초당 20,000개 거리 계산 요청
+
+```
+String 방식 (매번 전체 24 MB 다운로드):
+20,000 req/s × 24 MB = 480 GB/s
+(비현실적! 실제로는 배치 처리 + 캐싱하므로 이론상)
+
+실제 트래픽 (지역별 캐시 미스율 5%):
+20,000 × 0.05 miss × 24 MB = 24 GB/s (여전히 엄청남)
+
+Hash 방식 (필요 필드만):
+20,000 req/s × 10 bytes = 200 KB/s (100배 개선!)
+```
+
+### 클러스터 모드에서의 차이
+
+Redis 클러스터는 slot 기반 파티셔닝을 한다.
+
+```
+[Client] ─ GET key ─→ [Slot X (Node 1)]
+          ←──────────
+
+           (전체 24 MB 응답)
+```
+
+네트워크 I/O가 클러스터의 병목이 되면, **각 노드의 throughput이 급격히 저하**된다.
+
+Hash + 부분 조회로 네트워크 I/O를 1/100로 줄이면, 클러스터 처리량을 10배 이상 향상시킬 수 있다.
+
+---
+
+## 3. 캐시 접근 패턴 분석
+
+### 지역 ID 기반 리파티션의 이점
+
+Kafka에서 지역 ID로 리파티션하면, 같은 지역의 배달들이 같은 파티션으로 모인다.
+
+```
+입력: [
+  {from: "강남", to: "서초"},
+  {from: "강남", to: "서대문"},
+  {from: "서초", to: "강남"},
+  {from: "강남", to: "강동"},
+  ...
+]
+
+리파티션 후 (지역 ID 기준):
+Partition 1: 강남 → * (5번 호출)
+Partition 2: 서초 → * (2번 호출)
+...
+```
+
+**결과**: 캐시 지역성(Locality) 향상
+
+```
+강남 ↔ 서초 거리: 캐시 히트 (같은 지역 배달 반복)
+강남 ↔ 서대문 거리: 캐시 미스 → Redis 조회 (그 후 히트)
+```
+
+String 방식: 캐시 미스 1번 = 24 MB 네트워크 I/O
+Hash 방식: 캐시 미스 1번 = 10 bytes 네트워크 I/O
+
+**캐시 히트율 95%라면:**
+
+```
+String: 5% × 24 MB = 1.2 MB 실제 트래픽
+Hash:   5% × 10 bytes = 50 bytes 실제 트래픽 (24,000배 차이!)
+```
+
+---
+
+## 4. TTL 전략: EXPIRE vs 명시적 삭제
+
+### 문제: TTL 기반 만료의 오버헤드
+
+원래 설계:
+
+```
+배달 생성 → SETEX key 24_hours_ttl
+배달 완료 → (자동으로 24시간 후 만료)
+```
+
+문제:
+- EXPIRE 명령이 **매 갱신마다 실행** (비용 증가)
+- 대량의 키가 동시에 만료 → **백그라운드 eviction 폭주** (CPU 스파이크)
+
+```
+대규모 배달 시스템 (초당 20,000 배달):
+20,000 배달/s × 86,400 초 = 1.7 × 10^9 만료 예정 키
+일괄 만료 시간대 → CPU 100% (eviction 처리)
+```
+
+### 개선: 명시적 삭제
+
+```
+배달 생성 → HSET pickup_hash field value (TTL 없음)
+배달 완료 → DEL hash 또는 HDEL hash field (명시적 삭제)
+배달 취소 → DEL hash (즉시 삭제)
+```
+
+**이점:**
+- EXPIRE 명령 제거 → CPU 부하 감소
+- 배달 상태 변화에 따라 정확한 타이밍에 삭제
+- Redis 메모리 더 예측 가능
+
+**코드 예시:**
+
+```java
+// ❌ TTL 기반 (문제)
+redis.setex("pickup_hash", 86400, jsonData);
+
+// ✅ 명시적 삭제 (개선)
+public void createDelivery(Delivery delivery) {
+    redis.hset("pickup_hash", 
+               delivery.getId(), 
+               delivery.getDistance());
+}
+
+public void completeDelivery(Long deliveryId) {
+    redis.hdel("pickup_hash", String.valueOf(deliveryId));
+}
+```
+
+---
+
+## 5. Redis 클러스터 모드에서의 영향
+
+### String Blob의 문제
+
+```
+클러스터 구성: 3개 노드, hash slot 범위 0-5461, 5462-10922, 10923-16383
+
+Key: "pickup_location_1"
+Slot: hash_slot("pickup_location_1") = 2000
+      → Node 1이 담당
+
+GET 요청:
+[Client] → [Node 1] (24 MB 전송)
+         ← 24 MB
+
+문제: Node 1의 네트워크 대역폭이 병목
+      (다른 노드들은 유휴)
+```
+
+### Hash + 필드 파티셔닝
+
+Hash 자체는 하나의 키이므로, 여전히 하나의 노드에만 저장된다.
+
+하지만 네트워크 트래픽이 1/100로 줄어들므로, 동일한 네트워크 대역폭으로 **100배 더 많은 쿼리 처리 가능**.
+
+```
+String: Node 1 = 20 req/s (24 MB/s 대역폭 한계)
+Hash:   Node 1 = 2,000 req/s (240 KB/s 대역폭만 필요)
+```
+
+**결론**: 핫 키 문제는 여전하지만, 네트워크 대역폭 병목은 크게 완화된다.
+
+---
+
+## 6. 쓰기 성능: Hash vs String
+
+### 값 갱신 비용 비교
+
+**String 방식 (전체 교체):**
+
+```
+SET pickup_location_1 <24 MB JSON>
+
+Redis 처리:
+1. 기존 Value (24 MB) 메모리 해제
+2. 새 Value (24 MB) 메모리 할당
+3. 네트워크 I/O: 24 MB 업로드
+
+시간: ~수십 ms
+```
+
+**Hash 방식 (필드별 갱신):**
+
+```
+HSET pickup_hash location_1_to_2 "5.5km"
+
+Redis 처리:
+1. 필드 조회 (O(1), 빠름)
+2. 필드값 교체 (10 bytes)
+3. 네트워크 I/O: 10 bytes 업로드
+
+시간: ~수 µs
+```
+
+### 성능 곡선
+
+```
+대량 갱신 (초당 10,000 배달, 각각 거리 재계산):
+
+String 방식:
+10,000 SET 요청 × 24 MB = 240 GB 업로드
+적절한 배치 처리 없으면 불가능
+
+Hash 방식:
+10,000 HSET 요청 × 10 bytes = 100 KB 업로드
+쉽게 처리 가능
+```
+
+---
+
+## 7. 실무 선택 기준
+
+| 기준 | String | Hash |
+|------|--------|------|
+| **메모리 효율** | 낮음 | 높음 |
+| **부분 조회** | ✗ 전체 필요 | ✓ 필드 단위 가능 |
+| **네트워크 대역폭** | 높은 비용 | 저비용 |
+| **쓰기 성능** | 느림 (대체) | 빠름 (필드 갱신) |
+| **캐시 히트율** | 낮음 | 높음 (지역성) |
+| **쿼리 복잡도** | 단순 (GET/SET) | 다양 (HGET/HSET/HGETALL) |
+
+### 언제 String을 사용하나?
+
+- 작은 크기 (< 1 MB)
+- 전체 값이 필요 (부분 조회 불필요)
+- 높은 쓰기 빈도 (매번 전체 교체)
+
+```
+예: 사용자 프로필 (JSON 1KB)
+SET user:123 "{\"name\": \"...\", \"age\": ...}"
+```
+
+### 언제 Hash를 사용하나?
+
+- 크기가 중간~큼 (> 10 MB 예상)
+- 필드 단위 부분 조회 필요
+- 필드별 갱신 빈도 높음
+
+```
+예: 배달 거리 캐시 (지역별 수천 거리)
+HSET delivery_distance region_A_to_B "5.3km"
+```
+
+---
+
+## 8. 구현 예시
+
+### 아키텍처
+
+```
+배달 생성 이벤트 (Kafka)
+  ↓
+이벤트 프로세서
+  ├─ OSRM으로 실거리 계산
+  ├─ 결과를 Redis Hash 저장
+  └─ 지역 ID로 리파티션 (같은 지역 이벤트 순차 처리)
+  
+배차 쿼리
+  ↓
+라이더 A 위치 → 배달 픽업지 거리?
+  ↓
+HGET delivery_distance "A_location_to_pickup" ← ~10 bytes
+```
+
+### 코드 (Spring + Lettuce)
+
+```java
+@Service
+public class DeliveryDistanceService {
+    
+    private final ReactiveRedisTemplate<String, String> redis;
+    
+    // 배달 생성 시: 거리 캐싱 (Hash)
+    public Mono<Void> cacheDeliveryDistance(
+        Long deliveryId, 
+        String region, 
+        String distance) {
+        
+        return redis.opsForHash()
+            .put(
+                "delivery_distance:" + region,
+                deliveryId.toString(),
+                distance
+            )
+            .then();  // 명시적 삭제하므로 TTL 없음
+    }
+    
+    // 배달 조회 시: 거리 조회
+    public Mono<String> getDeliveryDistance(
+        String region, 
+        Long deliveryId) {
+        
+        return redis.opsForHash()
+            .get(
+                "delivery_distance:" + region,
+                deliveryId.toString()
+            );
+    }
+    
+    // 배달 완료: 명시적 삭제
+    public Mono<Long> removeDeliveryDistance(
+        String region, 
+        Long deliveryId) {
+        
+        return redis.opsForHash()
+            .remove(
+                "delivery_distance:" + region,
+                deliveryId.toString()
+            );
+    }
+}
+```
+
+### 성능 모니터링
+
+```bash
+# Redis INFO 명령으로 메모리 사용량 확인
+redis-cli INFO memory
+# used_memory: 1.4 MB (vs 24 MB String 방식)
+
+# 네트워크 트래픽 모니터링
+redis-cli --latency-history
+# 평균 응답 시간 확인
+
+# SLOWLOG로 느린 쿼리 추적
+redis-cli SLOWLOG GET 10
+```
+
+---
+
+## 결론
+
+**Redis 캐싱 전략 선택:**
+
+1. **데이터 크기가 크면 (> 10 MB)**: Hash + 필드 단위 조회
+2. **부분 갱신이 빈번하면**: Hash (필드별 HSET)
+3. **TTL 기반 자동 삭제보다**: 명시적 상태 기반 삭제 선호
+4. **지역성 활용**: 파티션 전략 (같은 카테고리 이벤트 함께 처리)
+
+**성능 개선 체감:**
+- 메모리: 94% 절감
+- 네트워크: 100배 개선 (10 bytes vs 10 KB~MB)
+- 쓰기: 10배~100배 향상
+
+String Blob에서 Hash 구조로 전환하는 것은 단순한 최적화가 아니라, **아키텍처 레벨의 근본적 개선**이다.

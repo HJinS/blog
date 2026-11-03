@@ -1,0 +1,43 @@
+---
+import { getCollection } from "astro:content";
+import Layout from "@/layouts/Layout.astro";
+import Header from "@/components/Header.astro";
+import Breadcrumb from "@/components/Breadcrumb.astro";
+import Main from "@/components/Main.astro";
+import Footer from "@/components/Footer.astro";
+import Category from "@/components/Category.astro";
+import { getCategoryTree } from "@/utils/getUniqueCategories";
+import { useTranslations } from "@/i18n";
+import config from "@/config";
+
+const posts = await getCollection("posts", ({ data }) => !data.draft);
+const tree = getCategoryTree(posts);
+
+const locale = Astro.currentLocale ?? config.site.lang;
+const t = useTranslations(locale);
+---
+
+<Layout title={`${t.pages.categoriesTitle} | ${config.site.title}`}>
+  <Header />
+
+  <Breadcrumb />
+
+  <Main pageTitle={t.pages.categoriesTitle} pageDesc={t.pages.categoriesDesc}>
+    {
+      tree.map(({ group, count, subs }) => (
+        <section class="mb-8">
+          <ul class="mb-3 flex">
+            <Category path={[group]} {count} />
+          </ul>
+          <ul class="flex flex-wrap gap-x-6 gap-y-3 ps-4">
+            {subs.map(({ sub, count }) => (
+              <Category path={[group, sub]} label={sub} {count} size="sm" />
+            ))}
+          </ul>
+        </section>
+      ))
+    }
+  </Main>
+
+  <Footer />
+</Layout>

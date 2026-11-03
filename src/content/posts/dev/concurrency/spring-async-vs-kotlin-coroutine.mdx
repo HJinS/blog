@@ -16,7 +16,7 @@ description: 회원탈퇴 시 카카오/애플 unlink API 호출을 비동기로
 ## 개요
 
 회원탈퇴를 처리할 때 카카오/애플의 unlink(연결 끊기) API를 호출해야 했다.
-- 참고: [JWT 발급 및 세션 관리](/posts/jwt-session-management) 글 참고.
+- 참고: [JWT 발급 및 세션 관리](/posts/dev/auth/jwt-session-management) 글 참고.
 - 문제는 이 호출이 응답 시간을 좌우하면 안 된다는 것
 - 카카오/애플 API가 느리거나 잠깐 죽어있어도 탈퇴 요청 자체는 정상적으로 끝나야 한다.
 

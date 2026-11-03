@@ -62,7 +62,7 @@ class KakaoUnlinkAdapter(
 ### 토큰 세 종류, 성격이 다 다르다
 [참고 문서](https://developer.apple.com/documentation/signinwithapplerestapi/tokenresponse)
 
-![Apple 토큰 종류](../../assets/images/apple-token-response.png)
+![Apple 토큰 종류](../../../../assets/images/apple-token-response.png)
 
 | 토큰 | 만료 | 실질 용도 |
 |---|---|---|
@@ -135,7 +135,7 @@ public interface OAuth2AuthorizedClientRepository {
 
 ## 3. 어디에 저장할 것인가 redis vs rds
 
-이 값을 어디 저장할지는 [Redis vs RDB 판단 기준](/posts/redis-vs-rdb-loss-risk) 글의 기준을 그대로 적용해봤는데, 둘 다 걸렸다.
+이 값을 어디 저장할지는 [Redis vs RDB 판단 기준](/posts/dev/cache/redis-vs-rdb-loss-risk) 글의 기준을 그대로 적용해봤는데, 둘 다 걸렸다.
 
 - **Redis가 애매한 이유**: 이 값은 계정이 살아있는 몇 년 동안 유실 없이 보존돼야 한다. 지금까지 이 프로젝트가 Redis를 쓰는 방식은 전부 "유실되어도 감내할 수 있는" TTL 데이터였는데, 여기엔 그 전제가 안 맞는다.
 - **RDB가 애매한 이유**: OAuth refresh_token은 평문으로 컬럼에 넣기엔 너무 민감하다. 컬럼 레벨 암호화가 정석인데, 이 프로젝트엔 암호화 유틸리티가 전혀 없었다.

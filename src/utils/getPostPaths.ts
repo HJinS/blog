@@ -15,6 +15,15 @@ function getPostPathSegments(filePath: string | undefined): string[] {
   );
 }
 
+/**
+ * Returns the category path of a post: its folders under `BLOG_PATH`, as
+ * `[group, sub]`. Posts placed directly in `BLOG_PATH` have an empty path.
+ * e.g. `src/content/posts/dev/database/redis-summary.mdx` -> `["dev", "database"]`
+ */
+export function getPostCategoryPath(filePath: string | undefined): string[] {
+  return getPostPathSegments(filePath).slice(0, 2);
+}
+
 function getIdSlug(id: string): string {
   const postId = id.split("/");
   return postId.length > 0 ? String(postId[postId.length - 1]) : id;

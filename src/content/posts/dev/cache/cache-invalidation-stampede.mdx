@@ -1,0 +1,499 @@
+---
+author: 허진수
+pubDatetime: 2026-09-09T00:00:00.000Z
+title: 캐시 무효화와 Cache Stampede 문제
+slug: cache-invalidation-stampede
+featured: false
+tags:
+  - caching
+  - redis
+  - performance
+  - architecture
+  - concurrency
+description: "TTL 만료 순간 몰리는 요청을 다루는 방법 — 잠금, 확률적 조기 갱신, Xfetch 패턴을 통한 Thundering Herd 해결"
+---
+
+## 개요
+
+캐시 시스템의 두 가지 어려운 문제(Three Hard Things in Computer Science):
+
+> 1. 캐시 무효화 (Cache Invalidation)
+> 2. 변수명 짓기 (Naming Things)
+> 3. Off-by-one 오류
+
+이 글은 1번을 다룬다. 특히 **Cache Stampede(Thundering Herd)**라 불리는 성능 저하 문제를 집중 분석한다.
+
+---
+
+## 1. Cache Stampede란?
+
+### 시나리오
+
+```
+시간 → 
+
+T0:00  [Cache: user:123 = "John"]
+       TTL = 60초
+       
+T0:59  TTL 1초 남음
+       
+T1:00  ❌ [Cache Expired]
+       1개 요청이 조회:
+         user:123 = NULL (cache miss)
+         → DB 조회 (100 ms)
+         
+       [동시에 다른 요청들이 몰림]
+       999개 요청 (같은 순간)
+         → 모두 cache miss
+         → 모두 DB 조회 (동시에)
+         → DB에 1,000개 쿼리 몰림
+         → 데이터베이스 CPU 100%, 레이턴시 증가
+```
+
+### 메커니즘
+
+```
+캐시 1 미스
+│
+└─ DB 조회 시작 (100 ms 소요)
+   │
+   └─ [100 ms 동안 다른 요청들 대기]
+      └─ T1:00 ~ T1:00.1 사이에 999개 요청 도착
+         └─ 캐시 미스 (아직 갱신 안 됨)
+         └─ 모두 DB 조회 시작
+            └─ DB가 1,000개 쿼리를 동시에 처리
+               └─ 엄청난 부하 spike
+```
+
+### 용어: Thundering Herd (울리는 떼)
+
+컴퓨터 과학에서 "Thundering Herd Problem"은 대량의 프로세스가 동시에 깨어나 리소스에 접근하는 현상을 뜻한다.
+
+```
+━━━━━━ 캐시 미스 시간대 ━━━━━━
+║
+║  리소스 대기 중인 모든 요청 (1,000개)
+║  동시에 깨어남 → 모두 DB 접근
+║
+║  ┌────┬────┬────┬────┐
+║  │req1│req2│req3│req4│ ...
+└──┴────┴────┴────┴────┘
+    DB부하 폭주!
+```
+
+---
+
+## 2. Cache Stampede 수학 모델
+
+### 부하 계산
+
+**가정:**
+- 캐시 TTL: 60초
+- 정상 요청율: 1,000 req/s
+- DB 쿼리 시간: 100 ms
+- 캐시 히트율: 99%
+
+**정상 상황:**
+
+```
+1,000 req/s × 1% miss rate = 10 DB 쿼리/s
+DB 부하: 낮음 (충분히 처리 가능)
+```
+
+**Cache Stampede 발생 시:**
+
+```
+T1:00에 캐시 만료
+1,000 req/s × [100 ms 갱신 시간] = 100 동시 요청
+이 중 캐시 미스 (새로운 데이터 갱신 안 됨): 99개
+DB 쿼리: 99 req (정상 대비 10배 증가)
+
+혹은 더 심각한 경우:
+TTL 만료 후 첫 갱신이 느리면 (250 ms):
+1,000 req/s × 250 ms = 250개 동시 요청
+모두 cache miss → 250 DB 쿼리 (25배!)
+```
+
+### 영향도 분석
+
+```
+DB 응답 시간 증가 곡선:
+
+정상 부하:           10 req/s
+└─ 응답 시간: 10 ms
+
+Cache Stampede:      100+ req/s (동시)
+└─ 응답 시간: 50 ms (뮤텍스 대기)
+└─ 계단식 악화: 느려진 응답 + 계속 몰려오는 요청
+   └─ 결국 응답 시간 수백 ms까지 증가
+```
+
+**연쇄 효과 (Cascading Failure):**
+
+```
+사용자 API
+  └─ user:123 캐시 미스
+     └─ DB에서 user 정보 조회 (지연)
+        └─ 같은 요청 100개 대기
+           └─ 다른 API도 user 정보 필요해서 대기
+              └─ 전체 서비스 느려짐 (캐시 snowball)
+```
+
+---
+
+## 3. 해결 방법 1: 잠금 (Locking)
+
+### Lock-based Refresh
+
+```
+요청 1: GET user:123
+  └─ cache miss
+  └─ SET lock:user:123 (TTL 10초)
+  └─ 성공 → DB 조회 시작
+  
+[동시 요청 100개 도착]
+  └─ GET user:123
+  └─ cache miss
+  └─ SET lock:user:123 (잠금 이미 있음, 실패)
+  └─ 대기 (또는 기존 캐시 반환)
+  
+요청 1: DB 조회 완료
+  └─ SET user:123 <new value>
+  └─ DEL lock:user:123
+  
+[대기 중인 요청들]
+  └─ GET user:123 (이제 캐시 히트)
+```
+
+### 구현
+
+```java
+public class CachedDataService {
+    
+    private static final String LOCK_PREFIX = "lock:";
+    
+    public String getUserName(Long userId) {
+        String cacheKey = "user:" + userId;
+        String lockKey = LOCK_PREFIX + cacheKey;
+        
+        // 1. 캐시 조회
+        String cached = redis.get(cacheKey);
+        if (cached != null) {
+            return cached;  // ✓ 캐시 히트
+        }
+        
+        // 2. 캐시 미스: 잠금 시도
+        boolean lockAcquired = redis.setNX(lockKey, "1", Duration.ofSeconds(10));
+        
+        if (lockAcquired) {
+            // 3a. 잠금 획득: DB 조회 및 캐시 갱신
+            try {
+                String value = db.getUserName(userId);  // 느린 쿼리
+                redis.set(cacheKey, value, Duration.ofMinutes(1));
+                return value;
+            } finally {
+                redis.delete(lockKey);  // 잠금 해제
+            }
+        } else {
+            // 3b. 잠금 실패: 다른 요청이 갱신 중
+            // 옵션 1: 기존 캐시 반환 (있으면)
+            cached = redis.get(cacheKey);
+            if (cached != null) {
+                return cached;
+            }
+            
+            // 옵션 2: 잠금 해제 대기
+            for (int i = 0; i < 100; i++) {  // 최대 10초 대기
+                if (!redis.exists(lockKey)) {
+                    return redis.get(cacheKey);
+                }
+                Thread.sleep(100);  // 100ms 대기
+            }
+            
+            // 옵션 3: 타임아웃 후 DB 직접 조회
+            return db.getUserName(userId);
+        }
+    }
+}
+```
+
+### 장단점
+
+**장점:**
+- 단순함
+- DB 부하 제어 (동시 갱신 1개만)
+- 구현 복잡도 낮음
+
+**단점:**
+- 잠금 대기 중 다른 요청 지연 (응답 시간 증가)
+- Deadlock 가능성 (잠금 해제 실패)
+- 캐시 미스율 높은 경우 여전히 병목
+
+---
+
+## 4. 해결 방법 2: 확률적 조기 갱신 (Probabilistic Early Expiration)
+
+### 아이디어
+
+캐시가 아예 만료되기 전에, 확률적으로 조기에 갱신한다.
+
+```
+TTL: 60초
+
+T0:50  요청이 들어옴
+       TTL 남은 시간: 10초
+       
+       재계산 확률 = (1 - exp(-decay_param × remaining_time))
+                   = 1 - exp(-0.1 × 10)
+                   = ~63% 확률로 재계산
+       
+       ✓ 재계산 시작
+       
+T0:51  TTL 정확히 60초가 되기 전에 이미 갱신됨
+       → 캐시 만료 순간에 다른 요청들은 cache hit!
+```
+
+### 수식
+
+```
+decay_function(remaining_TTL):
+  P(recalculate) = 1 - exp(-decay_rate × remaining_TTL)
+  
+typical values:
+  decay_rate = 0.1
+  
+남은 시간 = 60초:  P = 1 - exp(-6) ≈ 0.0025 (0.25%)
+남은 시간 = 50초:  P = 1 - exp(-5) ≈ 0.0067 (0.67%)
+남은 시간 = 30초:  P = 1 - exp(-3) ≈ 0.0498 (5%)
+남은 시간 = 10초:  P = 1 - exp(-1) ≈ 0.6321 (63%) ← 높음
+남은 시간 = 1초:   P = 1 - exp(-0.1) ≈ 0.0952 (9.5%)
+```
+
+**직관:** TTL이 10초 이하로 남으면 갱신할 확률이 크게 증가한다.
+
+### 구현
+
+```java
+public class ProbabilisticCacheService {
+    
+    private static final double DECAY_RATE = 0.1;
+    
+    public String getUserName(Long userId) {
+        String cacheKey = "user:" + userId;
+        String ttlKey = "ttl:" + cacheKey;
+        
+        // 1. 캐시 조회
+        String cached = redis.get(cacheKey);
+        if (cached == null) {
+            return queryAndCache(userId, cacheKey);  // cache miss
+        }
+        
+        // 2. 남은 TTL 확인
+        Long ttl = redis.ttl(cacheKey);  // 초 단위
+        if (ttl == -1) {
+            return cached;  // TTL 없음 (만료 안 됨)
+        }
+        
+        // 3. 확률적 갱신 판단
+        double recalculateProbability = 1 - Math.exp(-DECAY_RATE * ttl);
+        if (Math.random() < recalculateProbability) {
+            // 백그라운드 갱신 시작 (비동기)
+            executorService.submit(() -> {
+                String newValue = db.getUserName(userId);
+                redis.set(cacheKey, newValue, Duration.ofMinutes(1));
+            });
+        }
+        
+        // 4. 현재 캐시 반환
+        return cached;
+    }
+    
+    private String queryAndCache(Long userId, String cacheKey) {
+        String value = db.getUserName(userId);
+        redis.set(cacheKey, value, Duration.ofMinutes(1));
+        return value;
+    }
+}
+```
+
+### 장단점
+
+**장점:**
+- Cache stampede 완벽 방지 (TTL 정확히 만료되지 않음)
+- 응답 시간 일정 (항상 캐시 반환)
+- 구현 간단함
+
+**단점:**
+- 오래된 데이터를 계속 반환할 수 있음 (약간의 staleness 용인)
+- 갱신 확률 튜닝 필요 (decay_rate 설정)
+- 매 요청마다 확률 계산 (CPU 오버헤드 미미)
+
+---
+
+## 5. 해결 방법 3: Xfetch 패턴
+
+### 개념
+
+```
+[Client]
+  ├─ GET key → (cache hit)
+  ├─ 반환
+  └─ 백그라운드에서 갱신 신호 전송
+  
+[Server]
+  ├─ 신호 수신 (TTL이 낮은 캐시들)
+  └─ 백그라운드 작업: key 갱신
+```
+
+더 정확하게는, 클라이언트가 "이 캐시는 시간이 얼마 안 남았으니 미리 갱신해달라"고 서버에 알린다.
+
+### 구현
+
+```java
+public class XfetchCacheService {
+    
+    private final ExecutorService refreshExecutor = 
+        Executors.newFixedThreadPool(10);  // 백그라운드 갱신 전용
+    
+    public String getUserName(Long userId) {
+        String cacheKey = "user:" + userId;
+        
+        CachedValue cached = redis.getWithTTL(cacheKey);
+        if (cached == null) {
+            return queryAndCache(userId, cacheKey);  // cache miss
+        }
+        
+        // TTL이 30% 이하 남으면 백그라운드 갱신 신호
+        if (cached.getTTL() < cached.getMaxTTL() * 0.3) {
+            // 다른 요청이 이미 갱신 중이라면 스킵
+            if (!redis.exists("refresh:pending:" + cacheKey)) {
+                redis.set("refresh:pending:" + cacheKey, "1", Duration.ofSeconds(10));
+                
+                // 백그라운드 갱신
+                refreshExecutor.submit(() -> {
+                    try {
+                        String newValue = db.getUserName(userId);
+                        redis.set(cacheKey, newValue, Duration.ofMinutes(1));
+                    } finally {
+                        redis.delete("refresh:pending:" + cacheKey);
+                    }
+                });
+            }
+        }
+        
+        return cached.getValue();  // 오래된 값이라도 반환
+    }
+    
+    private String queryAndCache(Long userId, String cacheKey) {
+        String value = db.getUserName(userId);
+        redis.set(cacheKey, value, Duration.ofMinutes(1));
+        return value;
+    }
+}
+```
+
+### 장단점
+
+**장점:**
+- 응답 시간 일정 (항상 캐시 반환)
+- 백그라운드 갱신이므로 주 요청 경로 영향 없음
+- TTL 임계값 자유로운 설정 가능
+
+**단점:**
+- 스케일링 복잡 (갱신 작업 큐 관리)
+- 약간의 staleness 용인 필요
+- 백그라운드 작업 모니터링 필수
+
+---
+
+## 6. 방법 비교
+
+| 방법 | 응답 시간 | DB 부하 제어 | Staleness | 구현 복잡도 |
+|------|---------|-----------|----------|-----------|
+| **Locking** | 증가 (대기) | ✓ 우수 | 없음 | 중간 |
+| **확률적 조기 갱신** | 일정 | ✓ 우수 | 허용 | 낮음 |
+| **Xfetch** | 일정 | ✓ 우수 | 허용 | 높음 |
+
+### 선택 기준
+
+**Locking:**
+- 데이터 정합성이 최고 우선
+- 약간의 응답 지연 용인 가능
+- 구현 간단
+
+**확률적 조기 갱신:**
+- 응답 시간 일정 필수
+- 약간 오래된 데이터 가능
+- 간단한 구현 선호
+
+**Xfetch:**
+- 대규모 시스템 (수십만 QPS)
+- 응답 시간과 정합성 모두 필요
+- 백그라운드 작업 인프라 보유
+
+---
+
+## 7. TTL 최적화 공식
+
+최적의 TTL을 계산하는 방법:
+
+```
+TTL_optimal = (갱신에 소요되는 시간 × safety_factor)
+            + (예상 cache stampede 영향도 고려)
+
+예시:
+갱신 시간: 100 ms
+DB 쿼리당 비용: 5ms
+예상 동시 요청: 1,000
+            
+요청율 × 갱신시간 = 1,000 req/s × 0.1s = 100 동시 요청
+
+스탬피드 영향 제한 <= 10 DB 쿼리:
+필요 TTL >= 100 req / 10 = 10초
+
+따라서 TTL >= 10초 설정
+
+실제로는 60~300초 권장 (갱신 시간 충분히 확보)
+```
+
+---
+
+## 8. 모니터링
+
+### 지표
+
+```
+redis-cli SLOWLOG GET 10
+→ 느린 쿼리 분석 (캐시 미스 spike 감지)
+
+redis-cli INFO stats
+→ evictions, keyspace_hits, keyspace_misses
+→ 캐시 히트율 (99% 이상 권장)
+
+db의 slow query log
+→ 동시 쿼리 수 모니터링
+→ 일정하지 않은 부하 증가 = 스탬피드 징조
+```
+
+### 알람 설정
+
+```
+캐시 히트율 < 95% → 경보
+→ cache stampede 가능성
+
+DB 동시 연결 수 급증 (평상시 대비 2배+) → 경보
+→ cache miss spike
+```
+
+---
+
+## 결론
+
+**Cache Stampede 해결 방법:**
+
+1. **단순함이 중요**: 확률적 조기 갱신부터 시작
+2. **모니터링 필수**: 캐시 히트율, DB 부하 추적
+3. **방법 조합**: 확률적 갱신 + 잠금 (fallback)
+4. **TTL 설정**: 갱신 시간 × 2 이상 추천
+
+Cache invalidation은 정말 어려운 문제지만, 패턴을 이해하면 대부분의 시스템에서 효과적으로 대응할 수 있다.

@@ -50,7 +50,7 @@ withdrawal:{userId}:completed_modules  → Set, 멤버는 help/review/communicat
 
 ## 3. 애플 refresh_token — 둘 다 애매해서 RDB + 암호화로 갔다
 
-카카오/애플 unlink API를 붙이면서, 애플의 revoke(연결 해제)에는 로그인 당시 발급받은 `refresh_token`을 그대로 다시 보내야 한다는 걸 알게 됐다([자세한 내용](/posts/kms-oauth-refresh-token-encryption)).
+카카오/애플 unlink API를 붙이면서, 애플의 revoke(연결 해제)에는 로그인 당시 발급받은 `refresh_token`을 그대로 다시 보내야 한다는 걸 알게 됐다([자세한 내용](/posts/dev/auth/kms-oauth-refresh-token-encryption)).
 
 이 값을 저장해야 했는데, 앞의 두 사례와 다르게 이번엔 Redis도 RDB도 그냥 걸리지 않았다.
 
