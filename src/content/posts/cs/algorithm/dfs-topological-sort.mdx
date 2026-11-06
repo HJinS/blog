@@ -1,0 +1,428 @@
+---
+author: 허진수
+pubDatetime: 2026-11-04T06:08:00.000Z
+title: "DFS와 위상 정렬: 순환 의존성은 어떻게 찾아내는가"
+featured: false
+draft: false
+tags:
+  - algorithm
+  - graph
+  - topological-sort
+description: 모듈 6개짜리 의존 그래프 하나로 BFS와 DFS의 방문 순서, 방문 상태 3색, Kahn 알고리즘과 DFS 후위 순서를 직접 따라가며 위상 정렬과 순환 의존성 탐지가 어떻게 동작하는지 이해한다.
+---
+
+## 개요
+
+빌드 도구는 어떤 모듈을 먼저 컴파일할지 정해야 한다. DB 마이그레이션 도구는 어떤 스크립트를 먼저 적용할지, Spring 컨테이너는 어떤 빈(bean)을 먼저 만들지 정해야 한다. 모두 "A가 끝나야 B를 시작할 수 있다"는 관계를 지키는 순서를 찾는 문제다.
+
+이 글이 답하는 질문은 두 가지다.
+
+- 선후 관계가 얽힌 작업들을 어떤 순서로 실행하면 되는가?
+- 서로가 서로를 기다리는 순환 의존성은 어떻게 찾아내는가?
+
+답의 재료는 그래프 탐색이다. 그래서 그래프를 메모리에 담는 방법과 BFS, DFS부터 짚고 위상 정렬로 넘어간다. 글 전체에서 그래프 하나만 쓴다. 같은 그래프를 여러 방법으로 돌려 보면 방법마다 무엇이 다른지가 잘 보인다.
+
+---
+
+## 1. 그래프 표현: 인접 리스트
+
+### 왜 필요한가
+
+모듈 6개짜리 프로젝트가 있다. 화살표 `u -> v`는 "u를 먼저 빌드해야 v를 빌드할 수 있다"는 뜻이다.
+
+```
+   +-------------------------------+
+   |                               v
+   A -----> B -------> D --------> F
+   |                   ^           ^
+   +------> C ---------+           |
+            |                      |
+            +--------> E ----------+
+```
+
+간선은 8개다. `A->B`, `A->C`, `A->F`, `B->D`, `C->D`, `C->E`, `D->F`, `E->F`. A는 공통 설정, F는 최종 애플리케이션이라고 생각하면 된다. F는 D와 E뿐 아니라 A도 직접 쓴다.
+
+이 그림을 코드가 다루려면 자료구조로 옮겨야 한다. 어떤 구조를 고르느냐에 따라 탐색 비용이 달라진다.
+
+### 핵심 아이디어
+
+**정점마다 "여기서 나가는 간선의 도착점 목록"을 들고 있으면, 탐색은 실제로 있는 간선만 본다.** 이 구조를 인접 리스트(adjacency list)라고 한다.
+
+### 두 가지 표현
+
+예시 그래프를 인접 리스트로 쓰면 다음과 같다.
+
+```python
+adj = {
+    "A": ["B", "C", "F"],
+    "B": ["D"],
+    "C": ["D", "E"],
+    "D": ["F"],
+    "E": ["F"],
+    "F": [],
+}
+```
+
+다른 선택지는 인접 행렬(adjacency matrix)이다. 정점이 V개면 V x V 표를 만들고, `u -> v` 간선이 있으면 `matrix[u][v]`를 1로 둔다.
+
+| 항목 | 인접 리스트 | 인접 행렬 |
+| --- | --- | --- |
+| 메모리 | `O(V+E)`: 정점 6 + 간선 8 | `O(V^2)`: 6 x 6 = 36칸 |
+| 한 정점의 이웃 전부 보기 | 이웃 수만큼 | 항상 V칸 |
+| 그래프 전체 탐색 | `O(V+E)` | `O(V^2)` |
+| "u -> v 간선이 있나?" | 이웃 목록을 훑음 | 칸 하나만 봄, `O(1)` |
+
+### 그래서 생기는 문제
+
+의존 그래프는 대부분 희소하다. 희소 그래프(sparse graph)는 간선 수가 V^2보다 훨씬 적은 그래프다. 모듈이 1만 개이고 각자 평균 5개에 의존한다면 간선은 5만 개다. 인접 리스트는 약 6만 항목이면 되지만, 인접 행렬은 1억 칸이 필요하고 그중 99.95%가 0이다. 그래서 이 글의 알고리즘은 모두 인접 리스트를 쓴다.
+
+간선 방향도 미리 정해 둬야 한다. 이 글은 "먼저 해야 하는 쪽 -> 나중 쪽"으로 그린다. 반대로 "v는 u에 의존한다"를 `v -> u`로 그리는 도구도 있다. 5절에서 볼 Python `graphlib`는 "정점 -> 그 정점의 선행 정점들"을 입력으로 받는다. 방향을 헷갈리면 결과 순서가 통째로 뒤집힌다.
+
+---
+
+## 2. BFS와 DFS: 같은 그래프, 다른 방문 순서
+
+### 왜 필요한가
+
+위상 정렬은 결국 그래프를 한 번씩 훑으면서 순서를 매기는 일이다. 훑는 방법은 크게 둘이다. 어느 쪽이 위상 정렬에 맞는지 알려면 두 방법이 정점을 어떤 순서로 방문하는지부터 봐야 한다.
+
+### 핵심 아이디어
+
+**BFS는 가까운 정점부터 넓게, DFS는 한 갈래를 끝까지 판 뒤 돌아온다.** BFS(breadth-first search, 너비 우선 탐색)는 큐(queue)로, DFS(depth-first search, 깊이 우선 탐색)는 재귀나 스택(stack)으로 구현한다.
+
+### BFS 단계별 동작
+
+A에서 시작한다. 큐에서 하나를 꺼내고, 아직 못 본 이웃을 큐 뒤에 넣는다.
+
+| 단계 | 꺼낸 정점 | 새로 넣은 이웃 | 큐 상태 |
+| --- | --- | --- | --- |
+| 0 | - | A | [A] |
+| 1 | A | B, C, F | [B, C, F] |
+| 2 | B | D | [C, F, D] |
+| 3 | C | E (D는 이미 봄) | [F, D, E] |
+| 4 | F | - | [D, E] |
+| 5 | D | - (F는 이미 봄) | [E] |
+| 6 | E | - (F는 이미 봄) | [] |
+
+방문 순서는 **A B C F D E**다. 시작점에서 간선 몇 개 만에 닿는지, 즉 거리 순서대로 나온다. B, C, F는 거리 1이고 D, E는 거리 2다.
+
+### DFS 단계별 동작
+
+같은 그래프를 A에서 DFS로 돈다. 이웃은 인접 리스트에 적힌 순서대로 본다.
+
+```
+visit A
+  visit B
+    visit D
+      visit F        (F has no neighbors) -> finish F
+    finish D
+  finish B
+  visit C
+    D already finished, skip
+    visit E
+      F already finished, skip
+    finish E
+  finish C
+  F already finished, skip
+finish A
+```
+
+DFS에는 순서가 두 가지 있다.
+
+- 전위 순서(pre-order): 정점에 처음 들어간 순서. **A B D F C E**
+- 후위 순서(post-order): 정점의 모든 후손을 다 처리하고 빠져나온 순서. **F D B E C A**
+
+### 그래서 생기는 문제
+
+BFS 순서 A B C F D E는 위상 순서가 아니다. F가 D와 E보다 앞에 있다. 그런데 F는 D와 E가 끝나야 빌드할 수 있다. BFS는 "얼마나 가까운가"만 볼 뿐 "선행 작업이 다 끝났는가"는 보지 않기 때문이다. F는 A에서 간선 하나로 닿으니 일찍 나왔다.
+
+BFS의 거리 개념은 다른 곳에서 빛난다. 간선 가중치가 모두 같을 때 최단 경로가 바로 BFS 거리다. 가중치가 있는 경우는 [최단 경로 글](/posts/cs/algorithm/shortest-path-dijkstra-bellman-ford)에서 다룬다.
+
+DFS의 후위 순서 F D B E C A를 뒤집으면 A C E B D F다. 8개 간선을 하나씩 대조하면 모두 앞 정점이 먼저 나온다. 우연이 아니다. 5절에서 이유를 본다.
+
+---
+
+## 3. 방문 상태 3색: gray를 다시 만나면 순환이다
+
+### 왜 필요한가
+
+순서를 구하기 전에 먼저 확인할 것이 있다. 사이클(cycle)이 있으면 위상 순서는 아예 존재하지 않는다. 사이클은 `X -> Y -> Z -> X`처럼 출발점으로 되돌아오는 경로다. X는 Z보다 앞에, Z는 Y보다 앞에, Y는 X보다 앞에 와야 하니 셋을 한 줄로 세울 방법이 없다.
+
+DFS 중에 이미 방문한 정점을 다시 만나는 일은 흔하다. 앞의 DFS에서 C는 D를 다시 만났다. 그런데 거기에 사이클은 없다. A에서 D로 가는 길이 두 갈래(B 경유, C 경유)일 뿐이다. "방문했다/안 했다" 두 상태로는 이 다이아몬드 모양과 진짜 사이클을 구분하지 못한다.
+
+### 핵심 아이디어
+
+**정점을 세 상태로 나누고, 지금 내려가는 경로 위에 있는 정점(gray)을 다시 만나면 사이클이다.**
+
+| 색 | 뜻 | 바뀌는 시점 |
+| --- | --- | --- |
+| white | 아직 방문하지 않음 | 처음 상태 |
+| gray | 방문 중. 지금 재귀 경로 위에 있음 | 정점에 들어갈 때 |
+| black | 방문 완료. 후손까지 다 처리함 | 정점에서 빠져나올 때 |
+
+미로에 실을 풀면서 들어가는 장면을 떠올리면 된다. gray는 지금 실이 깔린 칸이다. 막다른 길에서 돌아 나오면 실을 감고 그 칸에 "다 봤음(black)" 표시를 한다. 앞으로 가다 실이 깔린 칸을 다시 밟으면 원을 그리며 제자리로 돌아온 것이다. 다만 미로와 달리 그래프 간선은 한 방향으로만 갈 수 있다. 그래서 "왔던 칸으로 되돌아가는 것"은 간선을 거꾸로 타는 일이고 사이클로 치지 않는다.
+
+### 단계별 동작: 사이클이 없을 때
+
+원래 그래프에서 C가 D를 만나는 순간을 본다.
+
+```
+path (gray): A -> C
+D is black   (finished via A -> B -> D)
+=> already done, not a cycle
+```
+
+D는 이미 black이다. D 아래는 다 처리됐다는 뜻이므로 건너뛰면 된다.
+
+### 단계별 동작: 사이클이 있을 때
+
+누군가 C가 F의 산출물을 쓰도록 바꿔서 간선 `F -> C`가 생겼다고 하자. 다시 A에서 DFS를 돈다.
+
+| 단계 | 동작 | gray 경로 | 판단 |
+| --- | --- | --- | --- |
+| 1 | A 방문 | A | |
+| 2 | B 방문 | A B | |
+| 3 | D 방문 | A B D | |
+| 4 | F 방문 | A B D F | |
+| 5 | F의 이웃 C 방문 (white) | A B D F C | |
+| 6 | C의 첫 이웃 D를 봄 | A B D F C | **D가 gray -> 사이클** |
+
+gray 경로에서 D부터 끝까지 잘라 D를 붙이면 사이클이 그대로 나온다. `D -> F -> C -> D`다. 3색 DFS는 사이클이 "있다"는 사실뿐 아니라 "어디에" 있는지도 바로 알려 준다.
+
+### 그래서 생기는 문제
+
+DFS를 재귀로 짜면 호출 깊이가 경로 길이만큼 쌓인다. 정점 1만 개가 일렬로 이어진 체인이면 깊이도 1만이다. Python의 기본 재귀 한도는 1000이라(`sys.getrecursionlimit()`) 깊이 1000을 조금 넘으면 `RecursionError`가 난다. JVM도 스레드 스택 크기를 넘으면 `StackOverflowError`가 난다. 깊은 그래프를 다룬다면 명시적 스택으로 반복형 DFS를 짜거나 다음 절의 Kahn 알고리즘을 쓴다.
+
+무방향 그래프에는 이 3색 규칙을 그대로 쓰지 않는다. 무방향 간선은 양쪽으로 갈 수 있어서 방금 온 부모로 되돌아가는 간선도 gray를 만난다. 그래서 무방향 그래프는 "부모가 아닌 방문 정점을 만나면 사이클"로 판정한다. 의존 그래프는 방향 그래프이니 이 글에서는 3색만 쓴다.
+
+---
+
+## 4. Kahn 알고리즘: 진입 차수가 0인 것부터 꺼낸다
+
+### 왜 필요한가
+
+이제 순서를 구한다. 사이클이 없는 방향 그래프를 DAG(directed acyclic graph, 방향 비순환 그래프)라고 한다. 위상 정렬(topological sort)은 DAG의 모든 간선 `u -> v`에서 u가 v보다 앞에 오도록 정점을 한 줄로 세우는 것이다.
+
+2절에서 BFS가 실패한 이유는 "선행 작업이 다 끝났는지"를 세지 않았기 때문이다. 그 개수를 세면 된다. 이 방법은 A. B. Kahn이 1962년 Communications of the ACM에 발표해서 Kahn 알고리즘이라고 부른다.
+
+### 핵심 아이디어
+
+**아직 끝나지 않은 선행 작업이 0개인 정점은 지금 바로 실행해도 된다.** 정점으로 들어오는 간선 수를 진입 차수(in-degree)라고 한다. 진입 차수가 0인 정점을 꺼내 출력하고, 그 정점에서 나가는 간선을 지운다. 그러면 새로 0이 되는 정점이 생긴다.
+
+```python
+from collections import deque
+
+def kahn(adj):
+    indeg = {v: 0 for v in adj}
+    for u in adj:
+        for v in adj[u]:
+            indeg[v] += 1
+
+    queue = deque(v for v in adj if indeg[v] == 0)
+    order = []
+    while queue:
+        u = queue.popleft()
+        order.append(u)
+        for v in adj[u]:
+            indeg[v] -= 1          # u is done, one less prerequisite
+            if indeg[v] == 0:
+                queue.append(v)
+
+    if len(order) < len(adj):
+        raise ValueError("cycle detected")
+    return order
+```
+
+진입 차수를 세는 데 간선을 한 번, 큐를 도는 데 정점과 간선을 한 번씩 본다. 시간은 `O(V+E)`, 공간은 `O(V)`다.
+
+### 단계별 동작
+
+예시 그래프의 진입 차수는 A 0, B 1, C 1, D 2, E 1, F 3이다. F가 3인 이유는 A, D, E 세 곳에서 간선이 들어오기 때문이다.
+
+| 단계 | 꺼낸 정점 | 진입 차수 변화 | 큐 | 출력 |
+| --- | --- | --- | --- | --- |
+| 0 | - | - | [A] | |
+| 1 | A | B 1->0, C 1->0, F 3->2 | [B, C] | A |
+| 2 | B | D 2->1 | [C] | A B |
+| 3 | C | D 1->0, E 1->0 | [D, E] | A B C |
+| 4 | D | F 2->1 | [E] | A B C D |
+| 5 | E | F 1->0 | [F] | A B C D E |
+| 6 | F | - | [] | A B C D E F |
+
+결과는 **A B C D E F**다. BFS와 달리 F가 맨 끝에 나온다. 단계 1에서 F의 진입 차수는 2로 줄었을 뿐 0이 아니어서 큐에 들어가지 못했다. A가 끝났어도 D와 E가 아직 남아 있기 때문이다.
+
+### 사이클이 있으면
+
+3절처럼 `F -> C`를 추가하면 C의 진입 차수가 2가 된다.
+
+```
+indeg: A=0  B=1  C=2  D=2  E=1  F=3
+step 1: pop A -> B=0 (push), C=1, F=2
+step 2: pop B -> D=1
+queue empty. output = [A, B], 2 of 6
+left:  C=1  D=1  E=1  F=2   (all stuck)
+```
+
+큐가 비었는데 출력은 6개 중 2개다. C는 F를, F는 D와 E를, D와 E는 C를 기다린다. 사이클 안의 정점은 서로의 간선 때문에 진입 차수가 영원히 0이 되지 못한다. 그래서 Kahn의 사이클 판정은 `len(order) < len(adj)` 한 줄이다.
+
+### 그래서 생기는 문제
+
+Kahn은 "사이클이 있다"는 것과 "막힌 정점이 무엇인지"만 알려 준다. 막힌 정점에는 사이클 위의 정점뿐 아니라 사이클 뒤에 매달려 있을 뿐인 정점도 섞인다. 예를 들어 사이클과 무관한 G가 F 다음에 있었다면 G도 남는다. 정확한 사이클 경로를 사람에게 보여 주려면 남은 정점 안에서 3색 DFS를 한 번 더 돌려야 한다.
+
+대신 Kahn에는 DFS에 없는 정보가 있다. 같은 시점에 큐에 함께 있는 정점은 서로 의존하지 않는다. 진입 차수가 0인 정점을 한 번에 다 꺼내는 식으로 묶으면 단계(level)가 나온다.
+
+```
+level 0: A
+level 1: B C      <- can run in parallel
+level 2: D E      <- can run in parallel
+level 3: F
+```
+
+작업자가 충분하면 빌드는 4단계면 끝난다. 이 단계 번호는 BFS 거리와 다르다. F의 BFS 거리는 1이었지만 단계는 3이다. BFS 거리는 시작점에서 가장 짧은 경로의 길이이고, Kahn 단계는 가장 긴 선행 경로(`A -> C -> D -> F`)의 길이다. 작업마다 소요 시간이 다르다면 위상 순서대로 "내 시작 시각 = 선행 작업 종료 시각의 최댓값"을 채워 나가면 된다. 이렇게 구한 가장 긴 경로를 임계 경로(critical path)라고 하며, 전체 소요 시간을 결정한다.
+
+---
+
+## 5. DFS 후위 순서 방식과 비교
+
+### 왜 후위 순서를 뒤집으면 위상 순서인가
+
+2절에서 후위 순서를 뒤집은 A C E B D F가 올바른 위상 순서였다. 3색으로 보면 이유가 보인다.
+
+DFS가 u를 처리하다 간선 `u -> v`를 볼 때 v의 색은 셋 중 하나다.
+
+| v의 색 | 일어나는 일 | v와 u의 종료 순서 |
+| --- | --- | --- |
+| white | v를 방문해 끝낸 뒤 u로 돌아온다 | v가 먼저 끝남 |
+| black | 이미 끝났다 | v가 먼저 끝났음 |
+| gray | 사이클이다 | DAG에서는 일어나지 않음 |
+
+DAG라면 모든 간선 `u -> v`에서 v가 u보다 먼저 끝난다. 그러니 종료 순서(후위 순서)를 거꾸로 세우면 u가 v보다 앞에 온다. 위상 정렬과 사이클 탐지가 같은 DFS 한 번으로 끝나는 이유다. gray를 만나면 사이클이고, 끝까지 gray를 만나지 않으면 후위 순서를 뒤집은 것이 답이다.
+
+### 두 방법은 답이 다르다
+
+같은 그래프에서 Kahn은 A B C D E F를, DFS는 A C E B D F를 냈다. 둘 다 맞다. 위상 순서는 하나가 아니다. B와 C처럼 서로 간선이 없는 정점은 어느 쪽이 먼저 와도 된다.
+
+이 사실이 실무에서 사고를 부른다. 마이그레이션 스크립트 X가 Y가 만든 테이블을 쓰는데 의존을 선언하지 않았다고 하자. 지금 도구가 우연히 Y를 먼저 실행하면 문제가 드러나지 않는다. 그러다 도구 버전이 바뀌거나 정점 추가 순서가 바뀌면 어느 날 X가 먼저 돌고 깨진다. 의존은 반드시 간선으로 적어야 한다.
+
+### 비교
+
+| 항목 | Kahn (진입 차수 큐) | DFS 후위 순서 |
+| --- | --- | --- |
+| 시간 | `O(V+E)` | `O(V+E)` |
+| 사이클 판정 | 출력 수가 V보다 적으면 사이클 | gray 정점을 다시 만나면 사이클 |
+| 사이클 위치 | 막힌 정점 집합만 앎 | gray 경로를 잘라 사이클 경로를 바로 앎 |
+| 병렬 실행 정보 | 단계(level)가 자연스럽게 나옴 | 순서만 나옴, 병렬 정보는 따로 계산 |
+| 깊은 그래프 | 반복문이라 스택 걱정 없음 | 재귀면 스택 넘침 위험, 반복형으로 바꿀 수 있음 |
+| 사전순 최소 순서 | 큐를 우선순위 큐로 바꾸면 됨, `O(V log V + E)` | 직접 적용하기 어려움 |
+
+사전순 최소 순서가 필요할 때 큐 자리에 [힙](/posts/cs/algorithm/heap-timing-wheel)을 쓴다. "지금 실행할 수 있는 것 중 이름이 가장 앞선 것"을 매번 고르면 된다. 정점마다 한 번씩 넣고 빼니 `O(V log V)`가 더해진다.
+
+### 실제 라이브러리는 둘을 섞는다
+
+Python 표준 라이브러리 `graphlib`가 좋은 예다. Python 3.9에서 추가된 `TopologicalSorter`는 정점마다 남은 선행 정점 수(`npredecessors`)를 들고, 0이 된 정점을 준비 목록에 넣는다. Kahn 방식이다. 그리고 사이클이 있으면 따로 반복형 DFS(`_find_cycle`)를 돌려 사이클 경로를 찾아 `CycleError`에 담는다. 순서와 병렬성은 Kahn에게, 사이클 경로는 DFS에게 맡긴 셈이다.
+
+예시 그래프를 넣어 보면 위에서 손으로 구한 결과가 그대로 나온다. 입력은 "정점 -> 선행 정점들"이라는 점에 주의한다.
+
+```python
+from graphlib import TopologicalSorter, CycleError
+
+preds = {
+    "A": [], "B": ["A"], "C": ["A"],
+    "D": ["B", "C"], "E": ["C"], "F": ["A", "D", "E"],
+}
+print(list(TopologicalSorter(preds).static_order()))
+# ['A', 'B', 'C', 'D', 'E', 'F']
+
+ts = TopologicalSorter(preds)
+ts.prepare()
+while ts.is_active():
+    ready = ts.get_ready()     # ('A',) -> ('B', 'C') -> ('D', 'E') -> ('F',)
+    ts.done(*ready)
+
+preds["C"].append("F")         # add F -> C
+try:
+    list(TopologicalSorter(preds).static_order())
+except CycleError as e:
+    print(e.args[1])           # ['D', 'F', 'C', 'D']
+```
+
+`get_ready()`가 돌려주는 묶음이 4절의 단계와 같다. `CycleError`가 알려 주는 사이클도 3절에서 손으로 찾은 `D -> F -> C -> D`와 같다. 문서는 사이클이 여러 개면 그중 하나만 보고한다고 적고 있다.
+
+---
+
+## 6. 순환 의존성 탐지가 쓰이는 곳
+
+### 빌드 도구와 작업 스케줄러
+
+빌드 도구는 모듈이나 태스크를 정점으로, "먼저 해야 함"을 간선으로 그래프를 만든다. 그다음 위상 순서대로 실행하고, 같은 단계에 있는 작업은 병렬로 돌린다. 패키지 설치 순서, DB 마이그레이션 적용 순서, DAG 기반 워크플로 스케줄러도 같은 구조다.
+
+사이클 검사가 빠진 자체 스케줄러가 가장 위험하다. 4절의 사이클 그래프를 그런 스케줄러에 넣으면 A와 B만 실행되고 나머지는 서로를 기다린다. 에러 메시지도 없이 영원히 대기한다. "실행할 수 있는 작업이 하나도 없는데 대기 작업은 남아 있다"면 사이클이나 존재하지 않는 선행 작업을 의심한다. 작업을 등록하는 시점에 Kahn이나 3색 DFS로 검사해 두면 이런 상황을 막을 수 있다.
+
+### Spring 빈 순환 참조
+
+Spring 컨테이너는 빈을 만들 때 의존하는 빈을 먼저 만든다. A를 만들려면 B가 필요하고, B를 만들려면 C가 필요하면 C, B, A 순으로 만든다. 이것이 바로 DFS다.
+
+```java
+@Service
+public class OrderService {
+    private final PaymentService paymentService;
+
+    public OrderService(PaymentService paymentService) {
+        this.paymentService = paymentService;
+    }
+}
+
+@Service
+public class PaymentService {
+    private final OrderService orderService;
+
+    public PaymentService(OrderService orderService) {
+        this.orderService = orderService;
+    }
+}
+```
+
+`OrderService`와 `PaymentService`가 생성자로 서로를 요구한다. Spring Framework 문서는 이런 생성자 주입 순환을 해결할 수 없는 경우로 들고, 컨테이너가 실행 중에 이를 감지해 `BeanCurrentlyInCreationException`을 던진다고 설명한다.
+
+감지 방법은 3절의 gray 집합과 같다. `DefaultSingletonBeanRegistry`에는 "지금 생성 중인 빈 이름"을 담는 `singletonsCurrentlyInCreation` 집합이 있다.
+
+```
+create OrderService   -> in creation: { OrderService }                (gray)
+  need PaymentService -> in creation: { OrderService, PaymentService }
+    need OrderService -> already in creation (gray again)
+                      -> BeanCurrentlyInCreationException
+```
+
+빈 생성을 시작할 때 이 집합에 이름을 넣고, 이미 들어 있으면 예외를 던진다. 생성이 끝나면 이름을 뺀다. 각각 white에서 gray로, gray에서 black으로 바뀌는 순간이다.
+
+필드 주입이나 세터 주입이면 사정이 다르다. Spring Framework 문서에 따르면 세터 주입으로는 순환 의존을 구성할 수 있다. 이때 한쪽 빈은 초기화가 끝나기 전의 상태로 다른 쪽에 주입된다. 사이클을 "끊는" 대신 덜 만들어진 객체를 건네 넘어가는 것이다. 그래서 설계 문제가 있는데도 애플리케이션이 그대로 뜬다.
+
+**Spring Boot 2.6부터는 빈 사이의 순환 참조가 기본으로 금지된다.** 릴리스 노트는 "Circular references between beans are now prohibited by default"라고 적는다. 필드 주입으로 조용히 넘어가던 순환도 이제 시작 단계에서 실패한다. 릴리스 노트는 의존 사이클을 고치라고 권한다. 당장 고칠 수 없으면 `spring.main.allow-circular-references`를 `true`로 설정해 다시 허용할 수 있다. `SpringApplication`과 `SpringApplicationBuilder`에도 같은 설정용 메서드가 있다.
+
+순환을 끊는 방법은 그래프에서 간선 하나를 없애는 일과 같다.
+
+- 두 빈이 함께 쓰는 로직을 세 번째 빈으로 뽑아낸다. `A -> B`, `B -> A` 대신 `A -> C`, `B -> C`가 된다.
+- 한쪽 방향을 이벤트 발행으로 바꾼다. 직접 호출하던 의존이 사라진다.
+- 한쪽 의존을 지연 조회(`@Lazy`, `ObjectProvider`)로 바꾼다. Spring 문서에 따르면 주입 지점의 `@Lazy`는 실제 빈 대신 처음 쓸 때 대상을 찾는 프록시를 넣고, 더 복잡한 경우에는 `ObjectProvider`를 권한다. 생성 시점에는 상대 빈이 필요 없으니 생성 순서의 사이클이 풀린다. 간선은 남는다. 구조 문제는 그대로이므로 임시방편에 가깝다.
+
+---
+
+## 결론
+
+- 의존 관계는 인접 리스트로 담는다. 의존 그래프는 희소해서 탐색 비용이 `O(V+E)`로 끝난다.
+- BFS는 거리 순서로 방문할 뿐 선행 작업을 기다리지 않는다. 그래서 그대로는 위상 순서가 아니다.
+- 방문 상태를 white, gray, black 셋으로 나누면 "이미 끝난 정점"과 "지금 경로 위의 정점"을 구분할 수 있다. gray를 다시 만나면 사이클이다.
+- Kahn 알고리즘은 진입 차수가 0인 정점부터 꺼내며, 병렬 실행 단계까지 알려 준다. DFS 후위 순서를 뒤집는 방법은 사이클 경로를 바로 알려 준다. 실무 라이브러리는 두 방법을 섞어 쓴다.
+- Spring 컨테이너의 "생성 중인 빈" 집합은 gray 집합이다. Spring Boot 2.6부터는 이 순환을 기본으로 허용하지 않는다.
+
+---
+
+## 출처
+
+- [Spring Boot 2.6 Release Notes](https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-2.6-Release-Notes)
+- [Spring Framework Reference, "Dependency Injection: Circular dependencies"](https://docs.spring.io/spring-framework/reference/core/beans/dependencies/factory-collaborators.html)
+- [Spring Framework Reference, "Classpath Scanning and Managed Components" (`@Lazy` 주입 지점, `ObjectProvider`)](https://docs.spring.io/spring-framework/reference/core/beans/classpath-scanning.html)
+- [Spring Framework, DefaultSingletonBeanRegistry.java](https://github.com/spring-projects/spring-framework/blob/main/spring-beans/src/main/java/org/springframework/beans/factory/support/DefaultSingletonBeanRegistry.java)
+- [Python 문서, "graphlib: Functionality to operate with graph-like structures"](https://docs.python.org/3/library/graphlib.html)
+- [What's New In Python 3.9, graphlib](https://docs.python.org/3/whatsnew/3.9.html)
+- [CPython, Lib/graphlib.py](https://github.com/python/cpython/blob/main/Lib/graphlib.py)
