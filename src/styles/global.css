@@ -2,6 +2,7 @@
 @import "./theme.css";
 @import "./typography.css";
 @import "rehype-callouts/theme/obsidian";
+@import "katex/dist/katex.min.css";
 
 /* D2Coding Font - 로컬 파일 로드 */
 @font-face {
