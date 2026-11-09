@@ -1,0 +1,203 @@
+---
+author: 허진수
+pubDatetime: 2026-11-04T05:24:43.000Z
+title: MVCC와 Snapshot Isolation, 그리고 write skew
+featured: false
+draft: false
+tags:
+  - database
+  - mvcc
+  - transaction
+description: 행을 덮어쓰지 않고 버전으로 쌓는 MVCC가 읽기와 쓰기의 충돌을 없애는 원리와, 그 틈에서 생기는 write skew를 당직 의사 예시로 이해한다.
+---
+
+## 개요
+
+[앞선 글](/posts/cs/database/isolation-levels-anomalies)에서 격리 수준마다 막아 주는 이상 현상이 다르다는 것을 봤다. 이번 글은 그 격리 수준을 실제 DB가 어떻게 구현하는지를 다룬다.
+
+- 읽기와 쓰기가 서로를 기다리지 않게 하려면 어떻게 해야 할까?
+- 그렇게 만든 Snapshot Isolation은 왜 완벽하지 않을까?
+
+답은 **행을 여러 버전으로 보관하는 것**이고, 그 대가로 **write skew**라는 이상 현상이 남는다.
+
+## 1. 락만으로는 읽기가 막힌다
+
+가장 단순한 방법은 락(lock)이다. 행을 읽을 때도, 쓸 때도 락을 잡는다.
+
+계좌 잔액이 100인 행이 있다고 하자.
+
+- 트랜잭션 A가 잔액을 70으로 바꾸는 중이다. 아직 커밋 전이다.
+- 트랜잭션 B는 같은 행을 읽고 싶다.
+
+락 방식에서는 B가 A의 커밋을 기다려야 한다. 읽기만 하는 B가 쓰기 때문에 멈춘다.
+
+리포트 쿼리처럼 몇 분씩 걸리는 읽기가 있으면 문제가 커진다. 그동안 모든 쓰기가 줄을 선다.
+
+## 2. MVCC: 덮어쓰지 말고 버전을 쌓는다
+
+**MVCC**(Multi-Version Concurrency Control, 다중 버전 동시성 제어)는 행을 덮어쓰지 않고 새 버전을 추가하는 방식이다.
+
+> 핵심 아이디어: 읽기는 옛 버전을, 쓰기는 새 버전을 건드리니 서로 부딪히지 않는다.
+
+앞의 예시를 다시 보자.
+
+1. A가 잔액을 70으로 바꾼다. 100짜리 버전은 그대로 두고 70짜리 버전을 새로 만든다.
+2. A가 커밋하기 전에 B가 읽는다. B에게는 아직 커밋되지 않은 70이 보이지 않으므로 100을 읽는다.
+3. B는 락을 기다리지 않고 바로 진행한다.
+
+그래서 MVCC에서는 읽기가 쓰기를 막지 않고, 쓰기가 읽기를 막지 않는다. 쓰기끼리의 충돌만 따로 관리하면 된다.
+
+PostgreSQL, MySQL InnoDB, Oracle 같은 주요 RDBMS가 이 방식을 쓴다.
+
+## 3. 버전은 어떻게 기록하고, 무엇이 보일까
+
+PostgreSQL을 기준으로 설명한다. 모든 쓰기 트랜잭션에는 증가하는 ID가 붙는다. 그리고 행 버전마다 두 값을 기록한다.
+
+- **xmin**: 이 버전을 만든 트랜잭션 ID
+- **xmax**: 이 버전을 지우거나 새 버전으로 대체한 트랜잭션 ID (없으면 비어 있음)
+
+계좌 1번 행이 이런 상태라고 하자.
+
+| 버전 | balance | xmin | xmax |
+| --- | --- | --- | --- |
+| v1 | 100 | 100 | 120 |
+| v2 | 70 | 120 | (없음) |
+
+트랜잭션 120이 100을 70으로 바꾸고 커밋한 결과다. 이제 읽는 쪽을 보자.
+
+- 트랜잭션 110은 120이 커밋되기 전에 시작했다. 120의 변경이 보이지 않으므로 v1(100)을 읽는다.
+- 트랜잭션 130은 120이 커밋된 뒤에 시작했다. v2(70)를 읽는다.
+
+같은 순간에 한 쪽은 100을, 다른 쪽은 70을 읽는다. 둘 다 락 없이 동시에 진행한다.
+
+이 판단의 기준이 **스냅샷**(snapshot)이다. 스냅샷은 "그 순간 어떤 트랜잭션이 커밋을 마쳤고, 어떤 트랜잭션이 아직 진행 중인가"를 적어 둔 기록이다. 트랜잭션은 이 기록에 비추어, 커밋을 마친 트랜잭션이 만든 버전만 골라 읽는다.
+
+위 예시에서는 편의상 "시작할 때" 스냅샷을 잡는다고 했다. 정확히는 PostgreSQL REPEATABLE READ가 트랜잭션의 첫 번째 일반 문장(`BEGIN` 같은 제어 문장 제외)을 실행할 때 스냅샷을 잡는다.
+
+MySQL InnoDB는 방식이 조금 다르다. 최신 버전을 테이블에 두고, 이전 버전은 undo 로그에 있는 롤백 포인터로 복원한다. 결과는 같다.
+
+## 4. Snapshot Isolation이 막는 것
+
+스냅샷을 트랜잭션 시작 시점에 한 번 고정하면 **Snapshot Isolation**(SI, 스냅샷 격리)이 된다. 트랜잭션 내내 같은 세상을 본다.
+
+이 격리 수준은 [이상 현상 글](/posts/cs/database/isolation-levels-anomalies)에서 정의한 것 중 다음을 막는다.
+
+- dirty read: 커밋되지 않은 버전은 스냅샷에 안 보인다.
+- non-repeatable read: 같은 스냅샷을 계속 읽으니 값이 바뀌지 않는다.
+- phantom (읽기 관점): 새로 삽입된 행도 스냅샷에 없다.
+
+쓰기 충돌도 처리한다. 두 트랜잭션이 **같은 행**을 고치면 write-write 충돌이다. 규칙은 먼저 커밋한 쪽이 이긴다는 것이다(first-committer-wins). PostgreSQL에서는 나중에 고치려는 쪽이 먼저 고친 쪽의 결과를 기다리고, 먼저 쪽이 커밋하면 에러로 실패한다. 먼저 쪽이 롤백하면 그대로 진행한다.
+
+PostgreSQL의 REPEATABLE READ가 바로 이 SI다. 스냅샷 이후에 다른 트랜잭션이 바꾼 행을 고치려 하면 `could not serialize access due to concurrent update` 에러가 난다. 그래서 같은 행에 대한 lost update는 에러로 막힌다.
+
+## 5. 틈새: write skew
+
+문제는 충돌 감지가 "같은 행을 썼는가"에만 걸려 있다는 점이다. **읽은 내용이 나중에 바뀌었는가**는 추적하지 않는다.
+
+### 당직 의사 예시
+
+병원에 규칙이 있다. **당직 의사는 최소 1명이 남아 있어야 한다.** 지금 Alice와 Bob, 2명이 당직이다.
+
+두 사람이 거의 동시에 당직에서 빠지려 한다. 각자 앱은 이렇게 동작한다.
+
+1. 현재 당직자 수를 센다.
+2. 2명 이상이면 1명이 빠져도 되니, 자기 행을 "휴가"로 바꾼다.
+3. 커밋한다.
+
+```
+시간 ->
+
+T1 (Alice)                       T2 (Bob)
+BEGIN
+SELECT count(*)  -> 2
+                                 BEGIN
+                                 SELECT count(*)  -> 2
+UPDATE Alice -> 휴가
+COMMIT
+                                 UPDATE Bob -> 휴가
+                                 COMMIT
+
+결과: 당직 0명
+```
+
+두 트랜잭션은 같은 스냅샷(2명)을 봤다. 그리고 서로 **다른 행**(Alice, Bob)을 고쳤다. write-write 충돌이 없으니 DB는 둘 다 커밋시킨다.
+
+각 트랜잭션만 놓고 보면 규칙을 지켰다. 하지만 합치면 규칙이 깨진다. 이것이 **write skew**다.
+
+### 왜 위험한가
+
+write skew는 "여러 행을 읽어 조건을 확인하고, 그 결과를 근거로 **다른** 행을 쓰는" 패턴에서 생긴다.
+
+- 회의실 예약: 같은 시간대에 겹치는 예약 행이 없는지 확인하고, 새 예약 행을 삽입한다.
+- 아이디 선점: 같은 아이디의 계정 행이 없는지 확인하고, 새 계정 행을 삽입한다.
+- 출금 한도: 거래 내역 행들의 합계를 확인하고, 새 출금 행을 삽입한다.
+
+같은 행 하나를 읽고 고치는 재고 차감은 여기에 해당하지 않는다. 그쪽은 lost update이고, SI가 write-write 충돌로 막는다.
+
+단일 스레드 테스트에서는 재현되지 않는다. 고동시성에서 가끔 불변식이 깨진 데이터가 나타나는 식이라, 원인을 찾기도 어렵다.
+
+## 6. write skew를 막는 방법
+
+| 방법 | 동작 | 비용과 주의 |
+| --- | --- | --- |
+| Serializable (SSI) | PostgreSQL이 읽기-쓰기 의존성을 감시하다가 위험하면 한쪽을 실패시킨다 | 읽기는 막지 않지만 직렬화 실패(SQLSTATE 40001)가 나므로 재시도가 필수다 |
+| Serializable (2PL) | 읽기에도 락을 잡는다 (InnoDB SERIALIZABLE 등) | 동시성이 떨어지고 데드락이 늘어난다 |
+| `SELECT ... FOR UPDATE` | 읽은 행들을 잠가서 다른 트랜잭션이 못 바꾸게 한다 | 앱이 위험 지점을 알아야 한다 |
+| 제약 조건 | 불변식을 유니크, 체크 제약으로 DB에 표현한다 | 표현할 수 있는 규칙에만 쓸 수 있다 |
+| 공통 행 갱신 | 모든 트랜잭션이 카운터 행 같은 하나의 행을 고치게 해 일부러 충돌을 만든다 | 그 행이 병목이 된다 |
+
+당직 의사 예시라면 세는 쿼리를 행을 잠그는 쿼리로 바꾼다. PostgreSQL은 `count(*)` 같은 집계와 `FOR UPDATE`를 함께 쓸 수 없으므로, 당직자 행을 직접 가져와 애플리케이션에서 센다.
+
+```sql
+SELECT id FROM doctors WHERE on_call = true FOR UPDATE;  -- Alice, Bob 행을 잠금
+-- 가져온 행이 2개 이상일 때만 자기 행을 휴가로 바꾼다
+```
+
+두 트랜잭션이 같은 행을 잠그려 하므로 한쪽이 기다린다. MySQL 기본값이나 PostgreSQL READ COMMITTED라면, 기다린 쪽은 상대가 커밋한 최신 상태(1명)를 보고 빠지지 않는다. PostgreSQL REPEATABLE READ라면 기다린 쪽이 직렬화 에러를 받고 재시도한다.
+
+Serializable이 만능은 아니다. SSI는 실제로는 문제없는 경우에도 보수적으로 실패시킬 수 있다(거짓 양성). 앱은 트랜잭션을 통째로 재시도해야 한다. 재시도할 때 메일 발송이나 외부 API 호출이 중복되지 않도록 멱등성도 챙겨야 한다. 이 내용은 [다음 글](/posts/cs/database/serializability-2pl-ssi)에서 자세히 다룬다.
+
+## 7. 오래된 버전의 청소 비용
+
+버전을 쌓기만 하면 공간이 끝없이 늘어난다. 어떤 스냅샷도 볼 수 없는 옛 버전은 지워야 한다. PostgreSQL은 VACUUM, InnoDB는 purge가 이 일을 한다.
+
+여기서 함정이 있다. **가장 오래된 스냅샷이 아직 열려 있으면 그 이후의 옛 버전을 못 지운다.**
+
+- 방치된 세션(`idle in transaction`)
+- 몇 시간 도는 거대 배치
+- 오래된 복제 슬롯
+
+이런 것들이 가장 오래된 스냅샷을 붙잡는다. 그러면 PostgreSQL에서는 지우지 못한 옛 버전(dead tuple)이 쌓여 테이블과 인덱스가 부푼다(bloat). InnoDB에서는 아직 정리하지 못한 undo 기록의 목록(history list)이 길어진다. 옛 버전을 찾으려고 따라가야 하는 undo 사슬도 길어져 읽기가 느려진다.
+
+autovacuum이 돌아도 테이블이 줄지 않는다면 먼저 `pg_stat_activity`에서 `xact_start`가 오래된 트랜잭션을 찾는다. `idle_in_transaction_session_timeout` 설정으로 방치된 세션을 끊을 수도 있다.
+
+## 8. 같은 이름, 다른 동작
+
+격리 수준 이름은 DB마다 의미가 다르다. PostgreSQL과 MySQL의 REPEATABLE READ 차이는 [격리 수준 글](/posts/cs/database/isolation-levels-anomalies) 5절에서 봤다. 요약하면 이렇다.
+
+| DB와 격리 수준 | 실제 동작 |
+| --- | --- |
+| PostgreSQL REPEATABLE READ | 순수한 SI. 스냅샷 이후 바뀐 행을 고치면 에러가 난다 |
+| MySQL InnoDB REPEATABLE READ | 일반 SELECT는 스냅샷을 읽는다. UPDATE, DELETE, `FOR UPDATE`는 스냅샷이 아니라 가장 최근에 커밋된 값을 읽는다. 에러 없이 덮어쓰므로 lost update가 날 수 있다 |
+| Oracle SERIALIZABLE | 트랜잭션 시작 시점의 스냅샷을 읽고, 시작 뒤에 다른 트랜잭션이 커밋한 행을 고칠 때만 에러(ORA-08177)를 낸다 |
+
+MySQL처럼 스냅샷 대신 최신 커밋 값을 읽는 읽기를 흔히 current read라 부른다. MySQL 문서는 이를 잠금 읽기(locking read)라고 부른다.
+
+Oracle 문서가 설명하는 SERIALIZABLE은 이 글의 SI와 같은 규칙이다. 같은 행의 동시 수정만 막고, 읽은 행이 바뀌었는지는 보지 않는다. 그래서 이름은 SERIALIZABLE이지만 당직 의사 예시의 write skew를 막지 못한다.
+
+이름만 믿고 "REPEATABLE READ니까 안전하다"고 가정하면 안 된다. 쓰는 DB의 문서를 확인해야 한다.
+
+## 결론
+
+- MVCC는 행을 덮어쓰지 않고 버전으로 쌓아서, 읽기는 락 없이 자기 스냅샷을 읽게 한다. 대가는 버전 저장 공간과 청소 비용이다.
+- Snapshot Isolation은 dirty read, non-repeatable read, phantom(읽기)을 막지만 Serializable은 아니다.
+- 충돌 감지가 "같은 행에 대한 쓰기"에만 걸려 있어서, 읽은 조건에 의존해 다른 행을 쓰는 write skew는 막지 못한다. 당직 의사가 둘 다 빠지는 경우가 전형적이다.
+- 막으려면 `FOR UPDATE`, 제약 조건, 공통 행 갱신, 또는 Serializable과 재시도를 쓴다.
+
+Serializable을 켜면 DB가 이 문제를 자동으로 잡아 주는데, 어떻게 가능한지는 [다음 글](/posts/cs/database/serializability-2pl-ssi)에서 SSI를 통해 살펴본다.
+
+## 출처
+
+- [PostgreSQL 문서: Transaction Isolation](https://www.postgresql.org/docs/current/transaction-iso.html)
+- [MySQL 8.4 Reference Manual: Consistent Nonlocking Reads](https://dev.mysql.com/doc/refman/8.4/en/innodb-consistent-read.html)
+- [Oracle Database 19c Concepts: Data Concurrency and Consistency](https://docs.oracle.com/en/database/oracle/oracle-database/19/cncpt/data-concurrency-and-consistency.html)

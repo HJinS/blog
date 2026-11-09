@@ -12,7 +12,7 @@ description: TLB flush, 메모리 격리, clone() 플래그까지 — 프로세�
 
 ## 개요
 
-멀티태스킹 운영체제에서 두 개 이상의 작업을 동시에 실행하는 것처럼 보이려면, CPU는 실행 중인 작업을 자주 바꿔야 한다. 이를 **컨텍스트 스위칭(Context Switching)**이라 부른다.
+멀티태스킹 운영체제에서 두 개 이상의 작업을 동시에 실행하는 것처럼 보이려면, CPU는 실행 중인 작업을 자주 바꿔야 한다. 이를 **컨텍스트 스위칭(Context Switching)** 이라 부른다.
 
 문제는 이 전환이 무료가 아니라는 것이다.
 
@@ -398,3 +398,14 @@ int main() {
 - **C10K 해결 방식**: 프로세스/스레드 수 자체를 늘리지 말고, 이벤트 루프로 컨텍스트 스위칭 최소화
 
 어떤 방식을 선택할지는 **동시 연결 수**, **격리 요구사항**, **CPU 바운드 vs I/O 바운드** 특성에 따라 결정된다.
+
+---
+
+## 관련 글
+
+- [뮤텍스, 세마포어, 스핀락: 락은 어떻게 기다리는가](/posts/cs/os/mutex-semaphore-spinlock)
+- [CFS vruntime과 컨테이너 CPU throttling](/posts/cs/os/cfs-scheduler-cpu-throttling)
+- [프로세스 종료, 좀비와 고아, 그리고 컨테이너의 PID 1](/posts/cs/os/process-exit-zombie-pid1)
+- [가상 메모리: 페이지 테이블, TLB, 페이지 폴트, KPTI](/posts/cs/os/virtual-memory-page-table-tlb)
+- [캐시 일관성, MESI, 그리고 false sharing](/posts/cs/architecture/cache-coherence-mesi-false-sharing)
+- [I/O 멀티플렉싱: select/poll/epoll, 그리고 io_uring](/posts/cs/os/io-multiplexing-epoll-io-uring)

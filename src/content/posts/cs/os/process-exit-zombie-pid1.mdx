@@ -1,0 +1,234 @@
+---
+author: 허진수
+pubDatetime: 2026-11-04T05:38:00.000Z
+title: 프로세스 종료, 좀비와 고아, 그리고 컨테이너의 PID 1
+featured: false
+draft: false
+tags:
+  - os
+  - process
+  - container
+description: 프로세스가 죽은 뒤에도 흔적이 남는 이유와 좀비·고아의 처리 방식을 이해하고, 컨테이너에서 앱이 PID 1이 될 때 생기는 시그널·좀비 문제와 tini 해법까지 정리한다.
+---
+
+## 개요
+
+[앞 글](/posts/cs/os/process-vs-thread-context-switching)에서는 프로세스와 스레드가 무엇이 다른지 봤다. 이번 글은 프로세스의 끝을 다룬다. 프로세스는 `exit()`을 부르면 바로 사라질 것 같지만, 실제로는 한동안 흔적이 남는다.
+
+이 글이 답하는 질문은 두 가지다.
+
+- 이미 죽은 프로세스(좀비)가 왜 남고, `kill -9`로도 안 없어지는가?
+- 컨테이너에서 `docker stop`이 항상 10초씩 걸리고 `<defunct>`가 쌓이는 이유는 무엇인가?
+
+---
+
+## 1. 왜 죽은 프로세스의 흔적이 남는가
+
+부모 프로세스는 자식에게 일을 시키고, 나중에 "잘 끝났는가?"를 확인하고 싶다. 쉘에서 `echo $?`로 보는 종료 코드가 바로 그것이다.
+
+그런데 자식이 `exit()`과 동시에 모든 기록을 지워 버리면, 부모는 종료 코드를 알 방법이 없다. 부모가 아직 확인하지 않았을 수도 있기 때문이다.
+
+핵심 아이디어는 한 문장이다. **커널은 자식의 종료 코드와 자원 사용량을, 부모가 가져갈 때까지 최소한의 기록으로 남겨 둔다.**
+
+`exit()`이 하는 일을 단계로 보면 이렇다.
+
+1. 메모리, 열린 파일 디스크립터(file descriptor) 같은 자원은 즉시 해제된다.
+2. 프로세스 테이블 엔트리(PID, 종료 상태, 자원 사용량)만 남는다.
+3. 커널이 부모에게 `SIGCHLD` 시그널을 보낸다.
+4. 부모가 `wait()` 계열 시스템 콜을 부르면 종료 상태를 돌려주고 엔트리를 지운다.
+
+2번과 4번 사이의 상태가 좀비(zombie, 표시는 `Z`)다. 이미 죽었지만 부모가 확인하지 않은 프로세스다.
+
+---
+
+## 2. 좀비의 생애
+
+```
+  자식 프로세스            커널                     부모
+  -------------      ---------------        ----------------
+   Running
+      |
+   exit(0)  ------->  자원 해제
+                      상태를 Z로 변경  ---->  SIGCHLD 수신
+                      (PID, 종료 코드 보존)
+                           |                       |
+                           |   <---- waitpid() ----+
+                      엔트리 제거
+                      PID 반환  ------------>  종료 코드 획득
+```
+
+부모가 `waitpid()`를 부르지 않으면 엔트리가 계속 남는다. `ps`에서는 `Z` 상태이고 이름 옆에 `<defunct>`가 붙는다.
+
+### 좀비가 일으키는 문제
+
+좀비는 메모리를 거의 쓰지 않는다. 문제는 PID가 유한한 자원이라는 점이다. 좀비가 쌓이면 프로세스 테이블이 차고, 새 프로세스를 만들 때 `fork: Resource temporarily unavailable`(EAGAIN)로 실패한다. 컨테이너에서는 PID 한도(cgroup의 pids 제한)에 먼저 닿는 경우도 많다.
+
+### kill로는 못 없앤다
+
+`kill -9`는 "실행 중인 프로세스를 죽이는" 도구다. 좀비는 이미 죽어서 실행할 코드가 없으니 시그널을 줄 대상이 없다. 없애는 방법은 둘뿐이다.
+
+- 부모가 `wait()`를 부르게 한다.
+- 부모를 종료시킨다. 그러면 좀비가 입양되고(다음 절), 입양자가 수거한다.
+
+### SIGCHLD를 무시하면
+
+부모가 `SIGCHLD`를 `SIG_IGN`으로 명시하면 리눅스(POSIX)에서는 자식이 좀비로 남지 않고 곧바로 정리된다(man7 wait(2)). 대신 부모는 자식의 종료 코드를 얻을 수 없다. 종료 코드가 필요한 구조에서는 쓸 수 없는 방법이다.
+
+---
+
+## 3. 고아와 입양
+
+부모가 자식보다 먼저 죽으면 어떻게 될까. 자식이 끝나도 `wait()`를 불러 줄 사람이 없으니 영원히 좀비로 남을 것 같다.
+
+그래서 커널은 이런 자식을 **고아**(orphan)로 보고 다른 프로세스에 입양(reparenting)시킨다.
+
+- 기본 입양자는 PID 1인 init 프로세스다.
+- 가까운 조상 중에 `PR_SET_CHILD_SUBREAPER`를 설정한 프로세스가 있으면 그쪽이 입양자가 된다. 이런 프로세스를 서브리퍼(subreaper)라고 한다.
+- 컨테이너(PID namespace) 안에서는 그 namespace의 PID 1이 입양자다.
+
+입양자는 입양한 자식이 죽을 때마다 `wait()`로 수거해야 한다. init은 이 일을 하도록 만들어진 프로세스다. 문제는 컨테이너에서 이 자리를 일반 애플리케이션이 맡을 때 생긴다.
+
+---
+
+## 4. 컨테이너에서 앱이 PID 1이 되면
+
+컨테이너는 자기만의 PID namespace를 가진다. `Dockerfile`의 `ENTRYPOINT`나 `CMD`로 띄운 첫 프로세스가 그 안에서 PID 1이 된다. 보통은 init이 아니라 우리 앱이다.
+
+PID 1이 되면 책임이 둘 생긴다.
+
+| 책임 | 내용 | 앱이 안 하면 |
+|------|------|--------------|
+| 고아 수거 | 입양된 프로세스의 `wait()` | 좀비 누적, PID 고갈 |
+| 시그널 처리 | 종료 요청을 받아 정리 후 종료 | 종료가 지연되거나 강제 종료 |
+
+앱은 보통 이 두 가지를 염두에 두고 만들어지지 않았다. 헤드리스 브라우저나 셸 스크립트처럼 자식 프로세스를 많이 띄우는 앱이 PID 1이면 좀비가 빠르게 쌓인다.
+
+---
+
+## 5. PID 1에서는 SIGTERM이 무시된다
+
+`docker stop`은 먼저 `SIGTERM`을 보내 정상 종료를 요청하고, 유예 시간(grace period) 안에 안 끝나면 `SIGKILL`을 보낸다. 기본 유예 시간은 Docker가 10초, Kubernetes Pod가 30초다.
+
+일반 프로세스는 핸들러가 없어도 `SIGTERM`을 받으면 기본 동작으로 종료된다. 그런데 PID namespace의 init은 다르다. init이 실수로 죽으면 namespace 전체가 무너지기 때문에 커널이 보호한다.
+
+- 같은 namespace의 프로세스가 보낸 시그널은, init이 핸들러를 설치한 것만 전달된다.
+- 상위 namespace(호스트)가 보낸 시그널도, `SIGKILL`과 `SIGSTOP`을 제외하면 핸들러가 있어야 전달된다.
+
+(출처: man7 pid_namespaces(7))
+
+결과는 이렇다. 핸들러 없는 앱이 PID 1이면 `SIGTERM`은 조용히 버려진다.
+
+```
+  [앱이 PID 1, SIGTERM 핸들러 없음]
+
+  docker stop
+      |
+      +-- SIGTERM ---> 앱(PID 1)   무시됨, 아무 일도 안 일어남
+      |
+      |   ... 10초 대기 (grace period) ...
+      |
+      +-- SIGKILL ---> 앱(PID 1)   강제 종료, exit 137
+```
+
+종료 코드 137은 `128 + 9`(SIGKILL)이다. 연결 종료나 버퍼 flush 같은 정리 작업을 못 하고 죽는다. 배포나 스케일 인 때마다 종료가 유예 시간만큼 느려지고 종료 코드가 137이면 이 문제를 의심한다.
+
+### 셸 form이 만드는 같은 증상
+
+`CMD npm start`처럼 쓰는 셸 form은 `/bin/sh -c "npm start"`로 실행된다. 이때 PID 1은 앱이 아니라 셸이다. Docker 문서도 셸 form은 `/bin/sh -c`의 하위 명령으로 실행되어 시그널을 전달하지 않으므로, 앱이 `docker stop`의 `SIGTERM`을 받지 못한다고 적는다.
+
+`CMD ["npm", "start"]`처럼 배열로 쓰는 exec form은 셸을 거치지 않으니 앱이 바로 PID 1이 된다. 시그널은 앱에 닿지만, 이번에는 앱이 PID 1의 규칙을 직접 감당해야 한다.
+
+---
+
+## 6. 해결: 작은 init을 PID 1에 둔다
+
+앱이 모든 책임을 지게 하는 대신, 그 일만 하는 작은 init을 PID 1에 두고 앱을 자식으로 실행한다. 대표적인 것이 `tini`다. 비슷한 도구로 `dumb-init`도 있다.
+
+핵심 아이디어는 한 문장이다. **PID 1은 시그널 전달과 좀비 수거만 하고, 일은 자식인 앱이 한다.**
+
+```
+  [tini가 PID 1]
+
+  docker stop
+      |
+      +-- SIGTERM --> tini (PID 1) --SIGTERM--> 앱 (자식)
+                                                 |
+                                         graceful shutdown
+                                                 |
+      tini <------ SIGCHLD, wait() -------- 앱 exit
+      |
+   tini도 종료 (앱의 종료 코드를 그대로 전달)
+```
+
+동작을 개념 코드로 쓰면 이렇다.
+
+```text
+install_handlers(SIGTERM, SIGINT, SIGHUP -> forward_to(child))
+child = fork(); if child == 0: exec(app)
+loop:
+    pid = waitpid(-1, &status, 0)   // 입양된 고아를 포함한 모든 자식을 수거
+    if pid == child: exit(status)   // 주 프로세스가 끝나면 init도 종료
+    // 그 외는 좀비를 수거하고 계속
+```
+
+tini 프로젝트는 존재 이유를 "좀비를 만드는 소프트웨어로부터 보호"하는 것과 "핸들러가 없어도 `SIGTERM`이 프로세스를 종료시키게 하는 것"으로 설명한다(krallin/tini README).
+
+### 쓰는 방법
+
+Docker 1.13 이상에는 tini가 내장되어 있다. 이미지를 고치지 않고 실행 옵션만 주면 된다.
+
+```bash
+docker run --init myapp:latest
+```
+
+이미지에 직접 넣을 수도 있다.
+
+```dockerfile
+RUN apk add --no-cache tini
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "server.js"]
+```
+
+Kubernetes Pod 스펙에는 `docker run --init`에 해당하는 옵션이 없어서 보통 이미지에 tini를 넣는다. 다른 방법으로 `shareProcessNamespace: true`를 켜면 Pod의 pause 컨테이너가 PID 1이 된다. pause는 `SIGCHLD`를 받을 때마다 `waitpid()`로 자식을 수거하므로 좀비 문제는 해결된다. 대신 Pod 안의 컨테이너끼리 프로세스가 서로 보이게 되므로 격리가 약해진다.
+
+---
+
+## 7. 선택지 비교
+
+| 구성 | 시그널 전달 | 좀비 수거 | 비고 |
+|------|-------------|-----------|------|
+| 앱이 PID 1 (exec form) | 앱이 핸들러를 설치해야 함 | 앱이 직접 `wait()` | 단순하지만 앱이 init 책임까지 짐 |
+| 셸 form (`/bin/sh -c`) | 셸이 전달하지 않을 수 있음 | 셸이 PID 1 | `SIGTERM`이 앱에 안 닿는 대표 원인 |
+| tini, dumb-init, `--init` | 자식에게 전달 | PID 1이 수거 | 작은 프로세스 하나가 추가됨 |
+| systemd 같은 풀 init | 서비스 단위 관리 | 수거 | 무겁고 컨테이너당 프로세스 하나라는 방식과 안 맞음 |
+
+증상별로 원인을 좁히면 이렇다.
+
+- 종료가 항상 유예 시간만큼 걸리고 종료 코드가 137이다: 앱이 PID 1인데 `SIGTERM` 핸들러가 없거나, 셸 form이라 셸이 PID 1이다. 핸들러는 있는데 정리가 유예 시간보다 오래 걸리는 경우도 있다. 이때는 init을 도입해도 해결되지 않고 유예 시간이나 정리 로직을 손봐야 한다.
+- `ps`에 `<defunct>`가 늘고 결국 fork가 실패한다: PID 1이 입양된 자식을 `wait()`하지 않는다. init(tini)에 수거를 맡긴다.
+
+---
+
+## 결론
+
+- 프로세스는 `exit()` 뒤에도 종료 코드를 부모에게 전하려고 최소 기록을 남기고, 그 상태가 좀비다.
+- 좀비는 이미 죽었으므로 `kill`로 못 없앤다. 부모가 `wait()`하거나, 부모가 죽어 init·서브리퍼가 입양해 수거해야 한다.
+- PID 1은 고아 수거 책임이 있고, 커널은 PID 1이 죽지 않게 핸들러 없는 시그널을 전달하지 않는다.
+- 그래서 컨테이너에서 핸들러 없는 앱이 PID 1이면 `SIGTERM`이 무시되어 유예 시간 뒤 `SIGKILL`(137)로 죽고, 자식이 쌓이면 좀비로 PID가 고갈된다.
+- 해결은 `docker run --init`이나 tini로 작은 init을 PID 1에 두는 것이다. exec form 사용과 앱의 `SIGTERM` 핸들러 구현도 함께 챙긴다.
+
+[다음 글](/posts/cs/os/cfs-scheduler-cpu-throttling)에서는 살아 있는 프로세스로 돌아가, 스케줄러가 CPU를 나누는 방식과 컨테이너 CPU limit이 만드는 지연을 본다.
+
+---
+
+## 출처
+
+- [krallin/tini README](https://github.com/krallin/tini)
+- [docker container stop, Docker Docs](https://docs.docker.com/reference/cli/docker/container/stop/)
+- [Dockerfile reference (ENTRYPOINT shell form), Docker Docs](https://docs.docker.com/reference/dockerfile/)
+- [Pod Lifecycle (Termination of Pods), Kubernetes](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/)
+- [Share Process Namespace between Containers in a Pod, Kubernetes](https://kubernetes.io/docs/tasks/configure-pod-container/share-process-namespace/)
+- [pause.c, kubernetes/kubernetes](https://github.com/kubernetes/kubernetes/blob/master/build/pause/linux/pause.c)
+- [Control Group v2 (PID controller), kernel.org](https://docs.kernel.org/admin-guide/cgroup-v2.html)
+- [pid_namespaces(7), Linux manual page](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html)
+- [wait(2), Linux manual page](https://man7.org/linux/man-pages/man2/wait.2.html)

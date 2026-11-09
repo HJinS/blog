@@ -21,7 +21,7 @@ description: "TTL 만료 순간 몰리는 요청을 다루는 방법 — 잠금,
 > 2. 변수명 짓기 (Naming Things)
 > 3. Off-by-one 오류
 
-이 글은 1번을 다룬다. 특히 **Cache Stampede(Thundering Herd)**라 불리는 성능 저하 문제를 집중 분석한다.
+이 글은 1번을 다룬다. 특히 **Cache Stampede(Thundering Herd)** 라 불리는 성능 저하 문제를 집중 분석한다.
 
 ---
 
@@ -255,19 +255,19 @@ T0:51  TTL 정확히 60초가 되기 전에 이미 갱신됨
 
 ### 수식
 
-```
-decay_function(remaining_TTL):
-  P(recalculate) = 1 - exp(-decay_rate × remaining_TTL)
-  
-typical values:
-  decay_rate = 0.1
-  
-남은 시간 = 60초:  P = 1 - exp(-6) ≈ 0.0025 (0.25%)
-남은 시간 = 50초:  P = 1 - exp(-5) ≈ 0.0067 (0.67%)
-남은 시간 = 30초:  P = 1 - exp(-3) ≈ 0.0498 (5%)
-남은 시간 = 10초:  P = 1 - exp(-1) ≈ 0.6321 (63%) ← 높음
-남은 시간 = 1초:   P = 1 - exp(-0.1) ≈ 0.0952 (9.5%)
-```
+$$
+P_{\text{recalc}} = 1 - e^{-\lambda \cdot t_{\text{remaining}}}
+$$
+
+$\lambda$는 decay_rate이고 보통 0.1을 쓴다. $t_{\text{remaining}}$은 남은 TTL이다. 값을 넣어 보면 다음과 같다.
+
+| 남은 시간 | 재계산 확률 |
+|---|---|
+| 60초 | $1 - e^{-6} \approx 0.0025$ (0.25%) |
+| 50초 | $1 - e^{-5} \approx 0.0067$ (0.67%) |
+| 30초 | $1 - e^{-3} \approx 0.0498$ (5%) |
+| 10초 | $1 - e^{-1} \approx 0.6321$ (63%), 높음 |
+| 1초 | $1 - e^{-0.1} \approx 0.0952$ (9.5%) |
 
 **직관:** TTL이 10초 이하로 남으면 갱신할 확률이 크게 증가한다.
 

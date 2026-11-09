@@ -1,0 +1,482 @@
+---
+author: 허진수
+pubDatetime: 2026-11-04T05:57:00.000Z
+title: "메모리 모델과 배리어: 네 줄짜리 코드가 0, 0을 내는 이유"
+featured: false
+draft: false
+tags:
+  - architecture
+  - concurrency
+  - memory-model
+description: store buffering 리트머스 테스트 하나로 store buffer, x86-TSO와 ARM의 차이, 메모리 배리어, Java volatile과 C++ acquire/release가 각각 무엇을 보장하는지 이해한다.
+---
+
+## 개요
+
+[앞 글](/posts/cs/architecture/pipeline-branch-prediction-spectre)에서는 CPU가 명령을 순서대로 실행하지 않는다는 것을 봤다. 그래도 한 스레드 안에서는 결과가 프로그램 순서대로 실행한 것과 같다. 문제는 스레드가 둘 이상일 때다. 다른 코어에서 보면 내 쓰기와 읽기의 순서가 뒤바뀌어 보일 수 있다.
+
+이 글은 아래 네 줄짜리 코드 하나로 끝까지 간다.
+
+```c
+// 초기값: x = 0, y = 0
+// Thread 1          // Thread 2
+x = 1;               y = 1;
+r1 = y;              r2 = x;
+```
+
+이 글이 답하는 질문은 두 가지다.
+
+- 이 코드가 끝난 뒤 `r1 == 0 && r2 == 0`이 나올 수 있는가? 나온다면 왜인가?
+- 그 결과를 막으려면 무엇을 써야 하는가? x86, ARM, Java, C++에서 각각 답이 어떻게 다른가?
+
+여기서 메모리 모델(memory consistency model)은 "한 코어의 읽기와 쓰기가 다른 코어에 어떤 순서로 보일 수 있는가"를 정한 약속이다. 하드웨어(x86, ARM)에도 있고, 언어(Java, C++)에도 있다.
+
+---
+
+## 1. 네 줄짜리 코드: store buffering 리트머스 테스트
+
+### 왜 이런 코드를 쓰는가
+
+이 코드는 억지로 만든 예제가 아니다. "둘 중 하나만 임계 구역에 들어간다"는 락 없는 상호 배제의 뼈대다. 각 스레드는 먼저 "나 들어간다"는 깃발을 올리고, 그다음 상대의 깃발을 확인한다.
+
+```c
+// Thread 1                       // Thread 2
+flag1 = 1;                        flag2 = 1;
+if (flag2 == 0) { /* 진입 */ }    if (flag1 == 0) { /* 진입 */ }
+```
+
+`x`를 `flag1`, `y`를 `flag2`로 바꾸면 위 코드와 같다. 둘 다 0을 읽으면 두 스레드가 동시에 임계 구역에 들어간다. 상호 배제가 깨진다.
+
+이렇게 결과 하나가 가능한지 불가능한지를 묻는 작은 동시성 프로그램을 리트머스 테스트(litmus test)라고 한다. 이 테스트는 store buffering, 줄여서 SB라고 부른다. 이름의 이유는 2절에서 나온다.
+
+### 직관대로라면 0, 0은 불가능하다
+
+직관은 이렇다. 두 스레드의 명령 네 개가 어떤 순서로든 하나씩 섞여 실행되고, 각 스레드 안에서는 프로그램 순서를 지킨다. 이 모델을 순차 일관성(sequential consistency, SC)이라고 한다. Lamport가 1979년에 정의한 가장 직관적인 메모리 모델이다.
+
+SC에서 가능한 순서는 6가지다. 전부 따라가 보자.
+
+| 순서 | 실행 순서 | r1 | r2 |
+|---|---|---|---|
+| 1 | `x=1`, `r1=y`, `y=1`, `r2=x` | 0 | 1 |
+| 2 | `x=1`, `y=1`, `r1=y`, `r2=x` | 1 | 1 |
+| 3 | `x=1`, `y=1`, `r2=x`, `r1=y` | 1 | 1 |
+| 4 | `y=1`, `r2=x`, `x=1`, `r1=y` | 1 | 0 |
+| 5 | `y=1`, `x=1`, `r1=y`, `r2=x` | 1 | 1 |
+| 6 | `y=1`, `x=1`, `r2=x`, `r1=y` | 1 | 1 |
+
+`r1 = r2 = 0`은 한 번도 나오지 않는다. 이유는 간단하다. 각 스레드에서 쓰기가 읽기보다 앞에 있으므로, 전체 순서의 맨 앞은 반드시 쓰기다. 맨 앞이 `x=1`이면 `r2=x`는 그 뒤에 실행되므로 1을 읽는다. 맨 앞이 `y=1`이면 `r1=y`가 1을 읽는다. 어느 쪽이든 둘 중 하나는 1이다.
+
+### 그런데 실제 CPU에서는 나온다
+
+이 코드를 x86 멀티코어에서 반복해서 돌리면 `r1 = r2 = 0`이 실제로 나온다. x86-TSO 논문(Sewell 외, CACM 2010)은 이 SB 예제를 첫 페이지에 놓고, 두 프로세서가 같은 실행에서 모두 0을 읽을 수 있다고 쓴다. 어떤 끼워 넣기 순서로도 설명할 수 없는 결과이므로, x86 멀티프로세서는 순차 일관성을 지키지 않는다.
+
+**핵심은 "명령이 실행된 순서"와 "그 효과가 다른 코어에 보이는 순서"가 다르다는 것이다.** 이 글의 나머지는 이 차이가 어디서 생기고 어떻게 막는지를 다룬다.
+
+---
+
+## 2. 원인: store buffer
+
+### 왜 store buffer가 필요한가
+
+코어가 메모리에 값을 쓰려면 그 캐시 라인을 독점 상태로 가져와야 한다. 다른 코어가 같은 라인을 갖고 있으면 무효화 메시지를 보내고 응답을 기다려야 한다. 이 과정은 [MESI 글](/posts/cs/architecture/cache-coherence-mesi-false-sharing)에서 봤다.
+
+쓰기 하나마다 이 왕복을 기다리면 코어는 그동안 놀게 된다. 그래서 거의 모든 현대 CPU는 쓰기를 일단 코어 전용 대기열에 넣고 바로 다음 명령으로 넘어간다. 이 대기열이 store buffer다.
+
+핵심 아이디어는 한 문장이다. **쓰기는 store buffer에 들어가는 순간 "끝난" 것으로 치고, 실제로 다른 코어에 보이는 것은 나중이다.**
+
+비유하면 store buffer는 보낸편지함이다. "보내기"를 누른 메일은 내 화면에서는 이미 보낸 것으로 보이지만, 상대 메일함에 도착하는 것은 조금 뒤다. 다만 이 비유는 한 군데서 틀린다. 메일은 보낸 순서와 다르게 도착할 수 있지만, x86의 store buffer는 FIFO라서 넣은 순서대로 빠져나간다. 이 차이가 4절에서 x86과 ARM을 가르는 지점이 된다.
+
+### 구조
+
+```
+  +-------------+                  +-------------+
+  |   Core 1    |                  |   Core 2    |
+  +-------------+                  +-------------+
+     |       ^                        |       ^
+   store   load: check own          store   load: check own
+     v     buffer first, then         v     buffer first, then
+  +-------------+   memory         +-------------+   memory
+  | store buffer|                  | store buffer|
+  |   [x=1]     |                  |   [y=1]     |
+  +-------------+                  +-------------+
+     | drain later                    | drain later
+     v                                v
+  +--------------------------------------------------+
+  |        shared memory (caches)    x=0, y=0        |
+  +--------------------------------------------------+
+```
+
+코어가 값을 읽을 때는 먼저 자기 store buffer를 본다. 같은 주소에 대한 쓰기가 버퍼에 있으면 그 값을 바로 가져온다. 이것을 store-to-load forwarding이라고 한다. 그래서 자기가 쓴 값은 자기에게는 즉시 보인다. 다른 코어의 버퍼는 볼 수 없다.
+
+### SB 테스트를 한 단계씩
+
+```
+ time  Core 1                        Core 2                        memory
+ ----  ----------------------------  ----------------------------  --------
+  t1   x=1  -> buffer [x=1]                                        x=0 y=0
+  t2                                 y=1  -> buffer [y=1]          x=0 y=0
+  t3   r1=y : not in buffer -> mem                                 x=0 y=0
+       r1 = 0
+  t4                                 r2=x : not in buffer -> mem   x=0 y=0
+                                     r2 = 0
+  t5   drain [x=1] -> memory                                       x=1 y=0
+  t6                                 drain [y=1] -> memory         x=1 y=1
+```
+
+1. t1: Core 1의 `x=1`은 버퍼에 들어갔다. 메모리의 `x`는 여전히 0이다.
+2. t2: Core 2의 `y=1`도 자기 버퍼에 들어갔다.
+3. t3: Core 1이 `y`를 읽는다. 자기 버퍼에 `y`는 없으므로 메모리에서 0을 읽는다.
+4. t4: Core 2가 `x`를 읽는다. 마찬가지로 0이다.
+5. t5, t6: 그제야 두 쓰기가 메모리에 반영된다. 이미 늦었다.
+
+각 코어 입장에서 명령은 프로그램 순서대로 실행됐다. 그런데 다른 코어가 보기에는 "`r1=y`가 `x=1`보다 먼저 일어난 것"처럼 보인다. 이를 store -> load 재정렬이라고 부른다. 정확히는 실행 순서가 바뀐 것이 아니라 쓰기의 공개가 늦어진 것이다.
+
+### 생기는 문제
+
+store buffer는 한 스레드만 보면 완전히 투명하다. 단일 스레드 프로그램은 store buffer가 있는지 없는지 알 수 없다. 그래서 이 최적화를 끌 이유가 없고, 모든 고성능 CPU가 쓴다. 그 대가로 여러 스레드가 메모리로 대화하는 코드는 순차 일관성을 가정할 수 없다.
+
+---
+
+## 3. x86-TSO: 뒤바뀌는 것은 store -> load 하나뿐이다
+
+### 왜 정확한 모델이 필요한가
+
+"순서가 바뀔 수 있다"만 알면 코드를 쓸 수 없다. 무엇이 바뀌고 무엇이 안 바뀌는지 알아야 필요한 곳에만 비용을 낸다. Intel과 AMD의 매뉴얼은 오랫동안 이를 산문으로 애매하게 설명했다. Sewell 외 연구진은 매뉴얼을 검토하고 실제 프로세서를 테스트해서 x86-TSO라는 수학적 모델을 만들었다. TSO는 Total Store Order의 줄임말이다.
+
+핵심 아이디어는 한 문장이다. **x86은 하드웨어 스레드마다 FIFO store buffer가 하나씩 있고 그 밖에는 모든 코어가 같은 메모리를 보는 기계처럼 동작한다.**
+
+### x86-TSO 추상 기계의 규칙
+
+논문은 x86-TSO를 다음 규칙의 추상 기계로 설명한다.
+
+| 규칙 | 의미 |
+|---|---|
+| 스레드마다 store buffer 하나 | 쓰기는 먼저 자기 버퍼에 들어간다 |
+| 버퍼는 FIFO | 버퍼의 쓰기는 넣은 순서대로 메모리에 반영된다 |
+| 읽기는 자기 버퍼의 최신 쓰기를 먼저 본다 | 없으면 공유 메모리에서 읽는다 |
+| `MFENCE` | 그 스레드의 store buffer를 비운다 |
+| `LOCK` 접두 명령 | 전역 락을 잡고 실행하며, 끝날 때 버퍼를 비운다 |
+
+`LOCK` 접두 명령은 `LOCK ADD`, `LOCK CMPXCHG`처럼 읽고-수정하고-쓰는 명령에 접두어를 붙인 것이다. `XCHG`는 접두어 없이도 `LOCK`이 붙은 것처럼 동작한다.
+
+### 네 가지 재정렬 중 무엇이 허용되나
+
+메모리 접근 두 개의 순서는 "앞이 load냐 store냐, 뒤가 load냐 store냐"로 네 가지다. x86-TSO 규칙을 적용하면 이렇다.
+
+| 앞 -> 뒤 | x86에서 | 이유 |
+|---|---|---|
+| load -> load | 유지 | 읽기는 순서대로 메모리를 본다 |
+| store -> store | 유지 | 버퍼가 FIFO다 |
+| load -> store | 유지 | 쓰기는 앞선 읽기가 끝난 뒤 버퍼에 들어간다 |
+| store -> load | **뒤바뀔 수 있음** | 쓰기는 버퍼에 남고 읽기는 먼저 메모리를 본다 |
+
+Intel 매뉴얼(SDM)의 예제 8-3 제목이 정확히 이것이다. "Loads May be Reordered with Older Stores." x86-TSO 논문은 이 예제가 바로 SB 테스트라고 짚는다. 단, 같은 주소라면 store-to-load forwarding 덕분에 자기가 쓴 값을 읽는다(예제 8-4). 이 글의 SDM 예제 번호는 x86-TSO 논문이 인용한 판 기준이고, 최신 SDM에서는 장 번호가 바뀌었을 수 있다.
+
+### SB를 막는 법
+
+SB 결과를 막으려면 쓰기와 읽기 사이에서 버퍼를 비우면 된다.
+
+```
+Thread 1             Thread 2
+MOV  [x], 1          MOV  [y], 1
+MFENCE               MFENCE
+MOV  r1, [y]         MOV  r2, [x]
+```
+
+`MFENCE`가 버퍼를 비운 뒤에야 읽기가 진행되므로, 읽는 시점에 내 쓰기는 이미 메모리에 있다. 논문의 amd5 테스트가 이 코드이고, 결과 0, 0은 금지된다. 쓰기 자체를 `XCHG`로 바꿔도 같다. `LOCK`이 붙은 명령은 끝날 때 버퍼를 비우기 때문이다. SDM 예제 8-9가 이 경우다.
+
+### 생기는 문제
+
+x86은 네 가지 중 하나만 허용하므로 "강한 모델"로 불린다. 프로그래머가 신경 쓸 곳이 적다. 대신 그 하나가 정확히 SB 패턴이라서, Dekker식 상호 배제나 "깃발 올리고 상대 확인" 코드는 x86에서도 배리어 없이는 깨진다. 그리고 `MFENCE`나 `LOCK` 명령은 버퍼가 빌 때까지 코어를 세우므로 공짜가 아니다.
+
+---
+
+## 4. ARM: 네 가지가 모두 뒤바뀔 수 있다
+
+### 왜 ARM은 더 약한가
+
+x86은 store buffer 하나만 드러내고 나머지는 숨긴다. 숨기는 데에는 하드웨어 비용이 든다. ARM과 POWER는 반대로 선택했다. 서로 다른 주소에 대한 접근은 순서를 거의 보장하지 않고, 순서가 필요한 곳은 프로그래머가 명시하게 한다. 그만큼 하드웨어는 쓰기를 순서와 상관없이 내보내고, 읽기를 먼저 처리하는 최적화를 자유롭게 할 수 있다.
+
+핵심 아이디어는 한 문장이다. **ARM에서 서로 다른 주소에 대한 두 접근은, 의존 관계나 배리어가 없으면 다른 코어에 어떤 순서로든 보일 수 있다.**
+
+### SB는 ARM에서도 나온다
+
+Maranget, Sarkar, Sewell의 ARM/POWER 튜토리얼은 같은 SB 테스트를 ARM 어셈블리로 돌린 결과를 싣고 있다. 배리어가 없으면 0, 0은 허용된다. 2012년 당시 ARMv7 칩에서 실제로 관측한 횟수도 있다.
+
+| 칩 | SB, 배리어 없음 | SB, 양쪽에 DMB |
+|---|---|---|
+| Tegra2 | 38억 번 중 4억 3천만 번 | 240억 번 중 0번 |
+| Tegra3 | 1,600만 번 중 100만 번 | 390억 번 중 0번 |
+
+양쪽에 `DMB`를 넣으면 한 번도 나오지 않는다. `DMB`(Data Memory Barrier)는 ARM의 메모리 배리어 명령이다.
+
+### x86과의 차이는 SB를 조금 바꾸면 보인다
+
+SB만 보면 x86과 ARM이 같아 보인다. 차이를 보려면 Thread 2의 쓰기를 Thread 1로 옮기고, Thread 2는 읽기만 하게 바꿔 본다. 이 변형을 message passing(MP)이라고 부른다.
+
+```c
+// 초기값: x = 0, y = 0
+// Thread 1 (생산자)    // Thread 2 (소비자)
+x = 1;   // 데이터       r1 = y;   // 깃발
+y = 1;   // 깃발         r2 = x;   // 데이터
+```
+
+`r1 == 1 && r2 == 0`, 즉 깃발은 봤는데 데이터는 옛 값인 결과가 가능한가?
+
+- x86: 불가능하다. store -> store와 load -> load가 유지되기 때문이다. SDM 예제 8-1이 이 경우다.
+- ARM: 가능하다. 튜토리얼은 세 가지 원인을 든다. Thread 1의 두 쓰기가 순서를 바꿔 반영될 수 있다. 다른 스레드에 다른 순서로 전파될 수 있다. Thread 2의 두 읽기가 순서를 바꿔 처리될 수 있다. 셋 중 하나만 있어도 결과가 나온다.
+
+| 재정렬 (다른 주소) | 순차 일관성 | x86-TSO | ARM |
+|---|---|---|---|
+| store -> load | 금지 | 허용 | 허용 |
+| store -> store | 금지 | 금지 | 허용 |
+| load -> load | 금지 | 금지 | 허용 |
+| load -> store | 금지 | 금지 | 허용 |
+| 순서를 강제하는 수단 | 필요 없음 | `MFENCE`, `LOCK` 명령 | `DMB`, `LDAR`/`STLR` |
+
+### 생기는 문제
+
+MP 패턴은 x86에서 배리어 없이도 우연히 동작한다. 그래서 x86 서버에서 몇 년간 멀쩡하던 "깃발로 데이터 넘기기" 코드가 ARM 서버(Graviton, Apple Silicon)로 옮기자마자 가끔 옛 값을 읽는다. 재현이 어렵고, 부하와 코어 수와 최적화 수준에 따라 나왔다 안 나왔다 한다.
+
+또 Arm의 메모리 모델 학습 자료(Learning Paths)는 실제 칩이 형식 모델보다 강하게 동작할 수 있다고 적는다. 내 칩에서 테스트가 통과해도 모델이 허용하는 결과라면 다른 칩에서는 나올 수 있다는 뜻이다. 그래서 테스트 통과가 정답의 증거가 되지 못한다.
+
+---
+
+## 5. 배리어: 순서를 되찾는 명령
+
+### 왜 필요한가
+
+하드웨어는 기본적으로 순서를 느슨하게 둔다. 프로그래머가 "여기서는 순서가 중요하다"고 알려 줄 방법이 필요하다. 그 방법이 메모리 배리어(memory barrier), 또는 펜스(fence)다.
+
+핵심 아이디어는 한 문장이다. **배리어는 "이 앞의 접근이 이 뒤의 접근보다 먼저 보여야 한다"는 선을 긋는 명령이다.**
+
+### 네 종류의 배리어
+
+Doug Lea의 JSR-133 Cookbook은 막는 순서에 따라 배리어를 네 가지로 나눈다. 3절의 재정렬 표와 정확히 짝이 맞는다.
+
+| 배리어 | 막는 것 | x86 | ARMv7 (Cookbook 기준) |
+|---|---|---|---|
+| LoadLoad | 앞의 load와 뒤의 load가 뒤바뀌는 것 | 명령 없음 | `dmb` |
+| StoreStore | 앞의 store와 뒤의 store가 뒤바뀌는 것 | 명령 없음 | `dmb st` |
+| LoadStore | 앞의 load와 뒤의 store가 뒤바뀌는 것 | 명령 없음 | `dmb` |
+| StoreLoad | 앞의 store와 뒤의 load가 뒤바뀌는 것 | `mfence` 또는 `LOCK` 명령 | `dmb` |
+
+x86에서 세 칸이 "명령 없음"인 이유는 3절에서 봤다. 그 순서는 하드웨어가 이미 지킨다.
+
+SB 테스트가 필요로 하는 것은 정확히 StoreLoad다. `x=1`과 `r1=y` 사이에 "앞의 쓰기가 보인 뒤에 읽어라"를 강제해야 한다. Cookbook은 StoreLoad가 거의 모든 최신 멀티프로세서에서 필요하고 보통 가장 비싸다고 적는다. store buffer를 비울 때까지 기다려야 하기 때문이다.
+
+### 컴파일러도 순서를 바꾼다
+
+하드웨어 배리어만으로는 부족하다. 컴파일러도 서로 관계없어 보이는 메모리 접근의 순서를 바꾸거나, 값을 레지스터에 담아 두고 다시 읽지 않는다. 그래서 배리어는 두 층이 있다.
+
+| 종류 | 막는 대상 | 예 |
+|---|---|---|
+| 컴파일러 배리어 | 컴파일러의 재배치 | MSVC `_ReadWriteBarrier()`, GCC `asm volatile("" ::: "memory")` |
+| 하드웨어 배리어 | CPU의 재정렬 | `mfence`, `dmb ish` |
+
+컴파일러 배리어만 있으면 컴파일된 명령 순서는 맞지만 CPU가 여전히 순서를 바꿀 수 있다. C와 C++의 `volatile`도 비슷하다. cppreference는 `volatile` 접근이 스레드 사이 동기화를 만들지 않고, 원자적이지도 않으며, 메모리 순서를 정하지도 않는다고 적는다.
+
+실제 사례가 있다. 2025년 11월 PostgreSQL 개발 메일링 리스트에 올라온 패치 제안에 따르면, Windows ARM64에서 MSVC `/O2`로 빌드한 PostgreSQL이 복제 테스트(`027_stream_regress`)에서 간헐적으로 실패했다. 제안자들은 MSVC용 스핀락 해제(`S_UNLOCK`)에 컴파일러 배리어인 `_ReadWriteBarrier()`만 있어 CPU 재정렬을 막지 못한다고 분석하고, `__dmb`로 하드웨어 배리어를 추가하는 패치를 냈다. x86과 ARM32는 기존 코드로 충분하다고 봤다(x86은 하드웨어가 이미 순서를 지키고, ARM32용 MSVC는 이미 전체 배리어를 내보낸다). 이는 제안 시점 작성자들의 분석이며, 이 글에서 최종 반영 여부까지 확인하지는 않았다.
+
+### 생기는 문제
+
+배리어 명령을 직접 넣는 코드는 이식할 수 없다. x86에는 `mfence`, ARM에는 `dmb`를 써야 하고, 어느 배리어가 어디에 필요한지 아키텍처마다 다시 따져야 한다. 그래서 대부분의 코드는 하드웨어 명령 대신 언어의 메모리 모델로 의도를 적고, 명령 선택은 컴파일러에 맡긴다. 다음 두 절이 그 언어 모델이다.
+
+---
+
+## 6. C++: acquire/release로는 SB를 막지 못한다
+
+### 왜 언어 메모리 모델이 필요한가
+
+같은 C++ 코드가 x86에서도 ARM에서도 같은 의미를 가져야 한다. C++11은 하드웨어 위에 추상 메모리 모델을 정의했다. 프로그래머는 `std::atomic` 연산마다 필요한 순서(`memory_order`)를 적고, 컴파일러는 대상 아키텍처에 맞는 명령을 고른다.
+
+핵심 아이디어는 한 문장이다. **순서를 강하게 요구할수록 비싸지므로, 필요한 만큼만 요구한다.**
+
+### 다섯 가지 순서
+
+cppreference는 여섯 가지 순서를 정의한다. 그중 사실상 쓰지 않는 `consume`을 빼고 줄이면 이렇다.
+
+| `memory_order` | 붙는 연산 | 보장 |
+|---|---|---|
+| `relaxed` | load, store | 그 연산의 원자성만. 순서 보장 없음 |
+| `acquire` | load | 이 load 뒤의 읽기·쓰기가 이 load 앞으로 올라오지 못한다 |
+| `release` | store | 이 store 앞의 읽기·쓰기가 이 store 뒤로 내려가지 못한다 |
+| `acq_rel` | 읽고-수정하고-쓰기 | 위 두 가지를 모두 |
+| `seq_cst` | 모두 | acquire/release에 더해, 모든 스레드가 같은 순서로 보는 단일 전체 순서 |
+
+acquire와 release는 한쪽 방향만 막는 문이다. release는 "앞의 것은 뒤로 못 간다", acquire는 "뒤의 것은 앞으로 못 온다"만 보장한다.
+
+### acquire/release가 잘하는 것: MP
+
+4절의 MP 패턴은 acquire/release로 정확히 고쳐진다.
+
+```cpp
+std::atomic<int> flag{0};
+int data = 0;
+
+// Thread 1 (생산자)
+data = 42;
+flag.store(1, std::memory_order_release);
+
+// Thread 2 (소비자)
+while (flag.load(std::memory_order_acquire) == 0) { }
+assert(data == 42);   // 절대 실패하지 않는다
+```
+
+release store가 쓴 값을 acquire load가 읽으면, 두 연산은 동기화 관계(synchronizes-with)를 맺는다. cppreference 표현으로는 그 뒤로 B는 A가 store 이전에 메모리에 쓴 모든 것을 볼 수 있다. `data`가 원자 변수가 아니어도 그렇다.
+
+### acquire/release가 못 하는 것: SB
+
+이제 SB에 같은 도구를 써 보자.
+
+```cpp
+std::atomic<int> x{0}, y{0};
+
+// Thread 1                                  // Thread 2
+x.store(1, std::memory_order_release);       y.store(1, std::memory_order_release);
+int r1 = y.load(std::memory_order_acquire);  int r2 = x.load(std::memory_order_acquire);
+```
+
+`r1 = r2 = 0`이 나올 수 있다. 각 스레드의 두 줄을 문 규칙에 대 보면 알 수 있다.
+
+```
+Thread 1:
+  x.store(1, release)   release: "my EARLIER ops can't move below me"
+                        -> says nothing about the load that follows
+  y.load(acquire)       acquire: "my LATER ops can't move above me"
+                        -> says nothing about the store that precedes
+
+  => the store may still sit in the store buffer while the load runs
+```
+
+release는 자기 앞을, acquire는 자기 뒤를 지킨다. "앞의 store와 뒤의 load" 사이, 즉 StoreLoad는 어느 쪽도 지키지 않는다.
+
+언어 규칙으로도 같은 결론이 나온다. cppreference에 따르면 동기화는 같은 원자 변수를 release한 스레드와 acquire한 스레드 사이에서만, 그것도 acquire load가 release store의 값을 읽었을 때만 생긴다. 0, 0 결과에서는 누구도 상대가 쓴 값을 읽지 않았으므로 스레드 사이에 happens-before가 하나도 없다. 그러면 각 load가 초기값 0을 읽는 것을 막는 규칙도 없다. C++ 모델에서 0, 0은 허용된 결과다.
+
+실제 명령을 보면 더 분명하다. Cambridge의 C/C++11 매핑 표에서 x86의 acquire load와 release store는 둘 다 그냥 `MOV`다. 배리어가 하나도 없으니 3절의 x86 SB와 같은 코드다.
+
+### seq_cst는 SB를 막는다
+
+순서를 `memory_order_seq_cst`로 바꾸면(기본값이므로 생략해도 된다) 0, 0은 금지된다. seq_cst 연산들은 모든 스레드가 동의하는 단일 전체 순서를 이루기 때문이다. 1절의 순차 일관성 논증이 그대로 적용된다. 맨 앞의 연산은 쓰기이고, 그 쓰기의 상대 스레드는 1을 읽는다.
+
+컴파일러는 이 보장을 아키텍처마다 다르게 구현한다.
+
+| 연산 | x86 | ARMv8 (AArch64) |
+|---|---|---|
+| load `acquire` | `MOV` | `LDAR` |
+| store `release` | `MOV` | `STLR` |
+| load `seq_cst` | `MOV` | `LDAR` |
+| store `seq_cst` | `XCHG` (또는 `MOV` + `MFENCE`) | `STLR` |
+| fence `seq_cst` | `MFENCE` | `DMB ISH` |
+
+`DMB ISH`의 `ISH`(inner shareable)는 배리어가 순서를 맞춰 줄 범위를 "같은 공유 영역의 코어들"로 정한다는 뜻이다. 일반적인 멀티코어 동기화에는 이 범위면 충분하다.
+
+x86에서는 비용을 seq_cst store 쪽에 몰았다. `XCHG`는 `LOCK`이 붙은 명령이라 버퍼를 비운다. 3절의 SDM 예제 8-9와 같은 원리다.
+
+ARMv8에서는 seq_cst와 acquire/release가 같은 명령으로 나온다. Arm 자료에 따르면 `LDAR`와 `STLR`는 다른 `LDAR`, `STLR`에 대해 순차 일관적이다. 즉 `STLR` 뒤의 `LDAR`는 앞으로 올라오지 못하므로, 별도 `DMB` 없이 SB가 막힌다.
+
+그렇다고 ARM에서는 acquire/release로도 SB가 막힌다고 기대하면 안 된다. 그것은 컴파일러가 acquire load를 우연히 `LDAR`로 내보냈기 때문이다. ARMv8.3에 추가된 `LDAPR`는 RCpc(release consistent processor consistent) 모델을 따르는 더 약한 acquire load라서, 앞선 `STLR`를 기다리지 않는다. Arm의 설명에 따르면 GCC 13.1과 LLVM 16부터는 acquire load를 `LDAR` 대신 `LDAPR`로 자동으로 내보낼 수 있다. 언어가 보장하지 않는 동작은 하드웨어나 컴파일러가 바뀌면 사라진다.
+
+### 생기는 문제
+
+seq_cst는 안전하지만 x86에서 store마다 `XCHG`를 쓴다. acquire/release는 싸지만 SB 같은 패턴을 막지 못한다. 그리고 cppreference가 경고하듯, seq_cst가 아닌 연산이 섞이는 순간 프로그램 전체의 순차 일관성 보장은 사라진다. 기본값 seq_cst로 시작하고, 측정해서 병목일 때만 약한 순서로 내리는 것이 안전한 순서다.
+
+---
+
+## 7. Java volatile: 선언 하나로 SB가 막히는 이유
+
+### 왜 필요한가
+
+Java는 C++보다 선택지가 단순하다. 일반 필드와 `volatile` 필드가 있고, `volatile`이 C++의 seq_cst에 해당하는 역할을 한다(`VarHandle`로 더 약한 순서를 고를 수도 있지만 여기서는 다루지 않는다).
+
+핵심 아이디어는 한 문장이다. **Java의 volatile 읽기와 쓰기는 모든 스레드가 동의하는 하나의 전체 순서 안에 놓인다.**
+
+### JLS 17절이 말하는 것
+
+Java 언어 명세(JLS) 17.4는 이렇게 정한다.
+
+1. volatile 읽기와 volatile 쓰기는 동기화 동작(synchronization action)이다(17.4.2).
+2. 실행마다 동기화 순서(synchronization order)가 있다. 모든 동기화 동작에 대한 전체 순서이고, 각 스레드 안에서는 프로그램 순서와 일치한다(17.4.4).
+3. volatile 읽기는 동기화 순서에서 자기 앞에 있는 마지막 쓰기를 본다(17.4.7의 일관성 조건).
+
+### SB에 적용하기
+
+`x`와 `y`를 `volatile`로 선언하면 네 연산이 모두 동기화 동작이다.
+
+```java
+volatile int x = 0, y = 0;
+
+// Thread 1      // Thread 2
+x = 1;           y = 1;
+r1 = y;          r2 = x;
+```
+
+동기화 순서는 프로그램 순서와 일치해야 하므로, 네 연산 중 맨 앞은 쓰기다. 맨 앞이 `x = 1`이라고 하자. `r2 = x`는 그 뒤에 있고, 자기 앞의 마지막 `x` 쓰기를 봐야 하므로 1을 읽는다. 맨 앞이 `y = 1`이면 `r1`이 1이다. 1절의 논증과 같다. 따라서 `r1 = r2 = 0`은 불가능하다.
+
+`volatile`을 빼면 이야기가 달라진다. 서로 다른 스레드가 같은 변수를 읽고 쓰는데 happens-before 관계로 묶이지 않으면 데이터 레이스(data race)다. JLS는 데이터 레이스가 없는 프로그램만 순차 일관적으로 보인다고 보장한다. 레이스가 있으면 JIT 컴파일러의 재배치와 CPU의 store buffer 때문에 0, 0이 나올 수 있다. JLS 17.4의 첫 예제도 일반 필드에서 직관에 어긋나는 결과가 나오는 경우를 보여 준다.
+
+### JVM은 이를 어떻게 구현하나
+
+JSR-133 Cookbook은 보수적인 구현 방법을 제시한다.
+
+| 위치 | 넣는 배리어 |
+|---|---|
+| volatile 쓰기 앞 | StoreStore |
+| volatile 쓰기 뒤 | StoreLoad |
+| volatile 읽기 뒤 | LoadLoad, LoadStore |
+
+SB를 막는 것은 volatile 쓰기 뒤의 StoreLoad다. x86에서는 다른 셋이 명령 없음이므로 사실상 이것 하나만 남고, Cookbook에 따르면 `mfence`나 `LOCK` 접두 명령으로 구현한다. 그래서 x86에서 volatile 읽기는 거의 공짜이고, 비용은 volatile 쓰기에 몰린다. C++ seq_cst의 x86 매핑과 같은 선택이다.
+
+단, Cookbook은 스스로 JMM 명세가 아니라 비공식 안내서이며 지금은 역사적 자료라고 밝힌다. 일부 프로세서 설명은 낡았다. 의미의 기준은 JLS이고, Cookbook은 "왜 그런 비용이 드는가"를 이해하는 데 쓴다.
+
+### 생기는 문제
+
+volatile은 SB와 MP를 모두 막지만, 모든 쓰기에 StoreLoad 비용을 낸다. 그리고 volatile은 개별 읽기와 쓰기의 순서만 보장한다. `count++`처럼 읽고-수정하고-쓰는 연산은 여전히 원자적이지 않다. 이것은 [다음 글](/posts/cs/architecture/cas-lock-free-aba)의 CAS가 다룬다.
+
+---
+
+## 8. 정리: 무엇을 언제 쓰나
+
+같은 SB 코드를 도구별로 놓으면 이렇다.
+
+| 도구 | SB의 0, 0 | x86 비용 | ARMv8 비용 | 잘 맞는 곳 |
+|---|---|---|---|---|
+| 일반 변수 (C/C++, Java) | 가능 (데이터 레이스) | 없음 | 없음 | 스레드 간 공유 금지 |
+| C/C++ `volatile` | 가능 | 없음 | 없음 | 하드웨어 레지스터, 시그널 핸들러 |
+| C++ `relaxed` | 가능 | 없음 | 없음 | 순서가 필요 없는 카운터 |
+| C++ acquire/release | 가능 | 없음 (`MOV`) | `LDAR`/`STLR` | MP, 락 구현 |
+| C++ `seq_cst`, Java `volatile` | 불가능 | store에 `XCHG`/`MFENCE` | `LDAR`/`STLR` | SB, Dekker식 상호 배제 |
+| 명시적 배리어 (`MFENCE`, `DMB`) | 불가능 | `MFENCE` | `DMB ISH` | 언어 모델로 표현하기 어려운 저수준 코드 |
+
+세 가지를 기억하면 된다.
+
+- **x86에서 통과한 테스트는 증거가 아니다.** x86은 store -> load 하나만 바꾸므로 MP 같은 버그를 숨긴다. ARM에서 드러난다.
+- **acquire/release는 "넘겨주기"용이다.** 한 스레드가 준비한 데이터를 다른 스레드가 받는 패턴에는 충분하다. 서로 상대를 확인하는 SB 패턴에는 부족하다.
+- **하드웨어 명령이 아니라 언어 모델로 적는다.** `std::atomic`과 `memory_order`, Java `volatile`로 의도를 적으면 컴파일러가 아키텍처마다 맞는 명령을 고른다. 검증이 필요하면 herd7(모델 기준으로 허용 결과 계산)과 litmus7(실제 하드웨어에서 반복 실행) 같은 도구로 리트머스 테스트를 돌린다.
+
+---
+
+## 결론
+
+- 메모리 모델은 "한 코어의 접근이 다른 코어에 어떤 순서로 보일 수 있는가"의 약속이다. 순차 일관성에서는 SB 테스트의 0, 0이 불가능하다.
+- store buffer는 쓰기의 공개를 늦춘다. 그래서 x86에서도 store -> load가 뒤바뀌어 0, 0이 나온다. x86-TSO는 이 하나만 허용하는 모델이다.
+- ARM은 서로 다른 주소에 대한 네 가지 재정렬을 모두 허용한다. x86에서 우연히 동작하던 MP 코드가 ARM에서 깨진다.
+- SB를 막으려면 StoreLoad 순서가 필요하다. 하드웨어로는 `MFENCE`, `LOCK` 명령, `DMB`이고, 언어로는 C++ seq_cst와 Java volatile이다. C++ acquire/release로는 막지 못한다.
+
+다음 글 [CAS와 lock-free 스택, ABA](/posts/cs/architecture/cas-lock-free-aba)에서는 이 순서 보장 위에서 읽고-수정하고-쓰기를 원자적으로 하는 CAS를 다룬다.
+
+---
+
+## 출처
+
+- Peter Sewell, Susmit Sarkar, Scott Owens, Francesco Zappa Nardelli, Magnus O. Myreen, "x86-TSO: A Rigorous and Usable Programmer's Model for x86 Multiprocessors", Communications of the ACM, 2010: https://www.cl.cam.ac.uk/~pes20/weakmemory/cacm.pdf
+- Luc Maranget, Susmit Sarkar, Peter Sewell, "A Tutorial Introduction to the ARM and POWER Relaxed Memory Models", 2012: https://www.cl.cam.ac.uk/~pes20/ppc-supplemental/test7.pdf
+- C/C++11 mappings to processors (University of Cambridge): https://www.cl.cam.ac.uk/~pes20/cpp/cpp0xmappings.html
+- cppreference, `std::memory_order`: https://en.cppreference.com/w/cpp/atomic/memory_order
+- The Java Language Specification, Java SE 21, Chapter 17 "Threads and Locks": https://docs.oracle.com/javase/specs/jls/se21/html/jls-17.html
+- Doug Lea, "The JSR-133 Cookbook for Compiler Writers": https://gee.cs.oswego.edu/dl/jmm/cookbook.html
+- Arm Learning Paths, "Thread Synchronization Examples": https://learn.arm.com/learning-paths/servers-and-cloud-computing/memory_consistency/examples/
+- Arm Learning Paths, "Thread Synchronization, Arm Memory Model, and Tools": https://learn.arm.com/learning-paths/servers-and-cloud-computing/memory_consistency/arm_mem_model/
+- Kyrylo Tkachov, "Enabling the LDAPR instructions for C/C++ compilers", Arm Community, 2023: https://developer.arm.com/community/arm-community-blogs/b/tools-software-ides-blog/posts/enabling-rcpc-in-gcc-and-llvm
+- Leslie Lamport, "How to Make a Multiprocessor Computer That Correctly Executes Multiprocess Programs", IEEE Transactions on Computers, C-28(9), 1979 (x86-TSO 논문의 참고문헌 [21]로 확인)
+- PostgreSQL hackers, "[PATCH] Fix ARM64/MSVC atomic memory ordering issues on Win11 by adding explicit DMB barriers" (2025-11-20): https://www.postgresql.org/message-id/A6152C7C-F5E3-4958-8F8E-7692D259FF2F%40greg.burd.me

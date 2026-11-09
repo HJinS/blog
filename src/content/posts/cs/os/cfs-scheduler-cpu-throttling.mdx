@@ -1,0 +1,182 @@
+---
+author: 허진수
+pubDatetime: 2026-11-04T05:39:00.000Z
+title: CFS vruntime과 컨테이너 CPU throttling
+featured: false
+draft: false
+tags:
+  - os
+  - scheduler
+  - cgroup
+  - container
+description: CFS가 vruntime으로 공정함을 만드는 방식을 짧게 짚고, 컨테이너 CPU limit이 평균 사용률이 낮아도 지연을 만드는 이유를 cgroup v2의 cpu.max와 cpu.stat으로 확인하는 법을 이해한다.
+---
+
+## 개요
+
+[앞 글](/posts/cs/os/process-exit-zombie-pid1)에서는 프로세스의 끝과 컨테이너의 PID 1을 봤다. 런큐와 컨텍스트 스위칭 비용은 [프로세스와 스레드 글](/posts/cs/os/process-vs-thread-context-switching)에서 다뤘다. 이번 글은 런큐에서 다음 태스크를 고르는 기준(vruntime)을 짧게 짚고, 그 위에 얹힌 기능인 컨테이너 CPU limit을 다룬다.
+
+이 글이 답하는 질문은 두 가지다.
+
+- CPU 사용률이 40%인데도 응답이 가끔 100ms씩 멈추는 이유는 무엇인가?
+- 그 멈춤이 CPU limit 때문인지 어떻게 확인하는가?
+
+여기서 throttling(스로틀링)은 그룹이 정해진 CPU 시간을 다 쓰면 다음 주기가 올 때까지 그룹의 모든 스레드를 멈추는 동작이다.
+
+---
+
+## 1. CFS가 공정함을 만드는 방법: 3문단 요약
+
+스케줄러(scheduler)는 실행 가능한(runnable) 태스크 중 다음에 CPU를 줄 대상을 고른다. Linux의 CFS(Completely Fair Scheduler)는 "이상적인 CPU라면 모든 태스크가 가중치 비율대로 동시에 진행한다"고 가정한다. 실제 CPU는 한 번에 하나만 실행하므로, 이상형에서 가장 뒤처진 태스크를 먼저 실행해 오차를 줄인다.
+
+뒤처진 정도를 재는 값이 vruntime(가상 실행 시간)이다. 태스크가 실제로 $\Delta$만큼 실행하면 vruntime은 $\Delta \times \frac{1024}{\text{weight}}$만큼 늘어난다. 1024는 nice 0 태스크의 가중치(weight)다. 가중치가 두 배인 태스크는 vruntime이 절반 속도로 늘어서 CPU를 두 배 받는다. nice 값이 한 단계 낮아질 때 가중치는 대략 1.25배 커지도록 표가 짜여 있다.
+
+코어마다 있는 런큐(run queue)는 vruntime을 키로 하는 레드-블랙 트리(red-black tree, 삽입과 삭제가 $O(\log N)$인 균형 이진 탐색 트리)다. 가장 왼쪽, 즉 vruntime이 가장 작은 태스크가 다음에 실행된다. 오래 잠들었다 깬 태스크는 vruntime을 큐의 `min_vruntime` 근처로 끌어올려 준다. 그렇지 않으면 한참 잔 태스크가 CPU를 독점한다.
+
+참고로 커널 문서에 따르면 Linux는 6.6부터 CFS에서 EEVDF로 넘어가기 시작했다. 이 글의 throttling은 어느 쪽 스케줄러 위에서도 같은 방식으로 동작하는 별도 기능이므로 vruntime 설명은 여기까지만 한다.
+
+---
+
+## 2. 왜 CPU limit이 필요한가: 가중치만으로는 부족하다
+
+CPU를 나누는 방법은 두 가지다. 하나는 경쟁할 때 비율로 나누는 방식이고, 다른 하나는 상한을 거는 방식이다.
+
+cgroup v2에서 앞의 것은 `cpu.weight`(기본값 100)다. 이웃이 CPU를 쓰지 않으면 혼자 다 써도 된다. 대신 이웃이 바빠지면 내 몫이 줄어든다. 상한은 보장되지 않는다.
+
+뒤의 것이 `cpu.max`다. 형식은 `$MAX $PERIOD`(마이크로초 단위)이고 기본값은 `max 100000`이다. 의미는 "`$PERIOD` 동안 최대 `$MAX`만큼 CPU를 쓸 수 있다"이다. `max`는 제한 없음을 뜻한다. 쿠버네티스 문서도 CPU limit을 커널이 throttling으로 강제하는 하드 상한이라고 설명한다. 즉 이 상한 방식에 해당한다.
+
+| 구분 | 동작 | 얻는 것 | 잃는 것 |
+|---|---|---|---|
+| `cpu.weight` | 경쟁할 때만 비율로 분배 | 놀고 있는 CPU를 자유롭게 사용, 멈춤 없음 | 상한이 없어 이웃의 영향을 받음 |
+| `cpu.max` | 주기당 사용량 상한 | 예측 가능한 상한, 격리와 과금 | CPU가 놀고 있어도 멈춤 -> 꼬리 지연 |
+
+핵심 아이디어는 한 문장이다. **CPU limit은 순간 속도가 아니라 주기당 누적 사용량을 제한한다.**
+
+---
+
+## 3. quota와 period: 한 주기 안에서 벌어지는 일
+
+`cpu.max`의 두 값을 quota(할당량)와 period(주기)라고 부른다. 예를 들어 `100000 100000`이면 100ms마다 100ms의 CPU 시간을 쓸 수 있다. 코어 1개에 해당하는 양이다.
+
+구현은 이렇다. 그룹의 quota는 전역 풀(pool)에 있다. 각 코어의 런큐는 스레드가 실행되려 할 때 이 풀에서 slice 단위로 CPU 시간을 가져간다. 커널 문서에 따르면 slice의 기본값은 5ms이고 `sched_cfs_bandwidth_slice_us`로 바꿀 수 있다. 풀이 비면 추가 요청은 거절되고, 요청한 스레드는 다음 period가 시작될 때까지 멈춘다.
+
+이제 숫자로 따라가 보자. quota 100ms, period 100ms인 컨테이너에서 CPU 바운드 스레드 4개가 4코어에서 동시에 돈다.
+
+```
+period 100ms, quota 100ms (= CPU 1개), 스레드 4개 동시 실행
+
+         0ms     25ms                              100ms
+CPU0     |#######|............ throttled ...........|
+CPU1     |#######|............ throttled ...........|
+CPU2     |#######|............ throttled ...........|
+CPU3     |#######|............ throttled ...........|
+                 ^                                 ^
+        4 x 25ms = 100ms         quota 리필, 다시 실행
+        quota 소진, 전체 정지
+```
+
+1. 0ms에 네 스레드가 동시에 시작한다. 각자 코어에서 CPU를 쓴다.
+2. 네 스레드가 동시에 도니 실제 시간 1ms가 지날 때마다 quota가 4ms씩 줄어든다.
+3. 25ms가 되면 4 x 25 = 100ms로 quota가 바닥난다.
+4. 남은 75ms 동안 네 스레드 모두 멈춘다.
+5. 100ms에 quota가 리필되고 같은 일이 반복된다.
+
+이 컨테이너의 평균 CPU 사용률은 코어 1개분, 즉 한도 이내다. 그런데 한 주기의 75%는 요청을 하나도 처리하지 못한다. 스레드 하나였다면 100ms를 쉬지 않고 돌았을 것이다. 병렬도가 높을수록 quota를 더 빨리 쓰고 더 오래 멈춘다.
+
+---
+
+## 4. 평균 사용률이 낮아도 지연이 튀는 이유
+
+모니터링 그래프의 CPU 사용률은 보통 몇 초 단위 평균이다. 위 예시에서 그래프는 "코어 1개 한도에 맞게 꾸준히 100%"로 보일 뿐이다. 한도 안이라서 문제가 없어 보인다.
+
+실제 요청은 주기 안에서 몇 번 도착한다. 요청이 처리에 CPU 40ms가 필요하다고 하자. 주기 초반에 도착하면 25ms 안에 끝날 수도 있지만, 24ms 시점에 도착한 요청은 처리를 시작하자마자 멈춰서 75ms를 기다린 뒤에야 끝난다. 처리 시간 40ms짜리가 100ms를 훌쩍 넘긴다.
+
+그래서 문제가 평균이 아니라 꼬리 지연(tail latency, 느린 쪽 상위 몇 % 요청의 지연)으로만 나타난다. 사용률이 낮은데 p99만 나쁘다면 throttling을 의심할 만하다.
+
+CPU가 실제로는 놀고 있어도 멈춘다는 점이 `cpu.weight`와의 결정적 차이다.
+
+---
+
+## 5. cpu.stat으로 확인하기
+
+추측하지 말고 숫자로 보면 된다. cgroup v2에서는 컨테이너의 cgroup 디렉터리에 있는 `cpu.stat`을 읽는다. 읽기 전용이고 `키 값` 형식이다.
+
+```
+# cat /sys/fs/cgroup/<그룹 경로>/cpu.stat
+usage_usec 10000000
+user_usec 9800000
+system_usec 200000
+nr_periods 100
+nr_throttled 100
+throttled_usec 7500000
+nr_bursts 0
+burst_usec 0
+```
+
+값은 예시이고, 시간은 마이크로초(usec)다. 커널 문서는 이 필드를 다음과 같이 정의한다.
+
+| 필드 | 의미 |
+|---|---|
+| `usage_usec` | 그룹이 쓴 CPU 시간 총합 (항상 표시) |
+| `nr_periods` | 지나간 enforcement period 수 |
+| `nr_throttled` | throttle된 횟수 |
+| `throttled_usec` | throttle되어 있던 시간의 누적 |
+| `nr_bursts`, `burst_usec` | burst가 발생한 period 수와 그 시간 |
+
+`nr_periods` 이하의 필드는 cpu 컨트롤러가 켜져 있을 때 나온다. 또 이 값들은 계층 합산이 아니다. 부모 그룹의 limit 때문에 생긴 throttling은 자식의 값에 잡히지 않는다.
+
+읽는 법은 간단하다. 숫자는 누적이므로 두 시점의 차이를 본다.
+
+- `nr_throttled` 증가분 / `nr_periods` 증가분이 throttle된 주기의 비율이다. 위 예시는 100/100, 즉 모든 주기에서 throttle됐다.
+- `throttled_usec`이 계속 늘어나는지 본다. 늘어나면 그만큼 멈춰 있었다는 뜻이다.
+- 이 비율이 높은데 `usage_usec`로 계산한 평균 사용률이 limit보다 한참 낮으면, 3절에서 본 "짧게 몰아 쓰고 멈추는" 패턴일 가능성이 크다.
+
+v1과 v2는 이름이 다르다. v1은 `cpu.cfs_quota_us`, `cpu.cfs_period_us` 파일을 쓰고, v2는 `cpu.max` 한 파일에 두 값을 적는다. 이 글의 이름은 모두 v2 기준이다.
+
+---
+
+## 6. 어떻게 줄이는가: 선택지와 트레이드오프
+
+원인이 "코어 수보다 병렬도가 큰 것"이므로 방법은 크게 세 가지다.
+
+| 방법 | 효과 | 잃는 것 |
+|---|---|---|
+| limit을 올리거나 없앤다 | throttle이 줄거나 사라진다 | 이웃 영향 가능, 과금과 격리가 약해짐 |
+| 스레드 수를 limit에 맞춘다 | quota를 천천히 쓰므로 긴 정지가 줄어든다 | 런타임 설정(예: 워커 수)을 직접 맞춰야 함 |
+| `cpu.max.burst`로 여유를 준다 | 앞 주기에 쓰지 않고 남긴 quota를 burst 값(최대 quota)만큼 모아 두었다가 순간 초과에 쓴다 | 그만큼 이웃에게 간섭이 생기고 상한이 느슨해짐 |
+
+자주 놓치는 것이 둘째 방법이다. 런타임이나 스레드 풀이 limit이 아니라 호스트의 코어 수를 기준으로 스레드를 만들면 문제가 커진다. 코어 64개 호스트에서 limit이 1 CPU인데 스레드가 64개 뜨면 quota를 순식간에 소진한다.
+
+limit을 아예 걸지 않고 `cpu.weight`만 쓰는 선택도 흔하다. 꼬리 지연이 중요한 서비스라면 이쪽이 낫다. 다만 이웃이 바빠질 때 내 몫이 줄어드는 위험은 감수해야 한다.
+
+---
+
+## 7. 사례: 낮은 사용률에서도 throttling이 났던 커널 회귀
+
+Indeed 엔지니어링 블로그는 컨테이너가 CPU를 거의 쓰지 않는데도 심하게 throttle된 사례를 공개했다. 해당 앱은 CPU 4.1개를 할당받았고 사용량은 0.5개를 넘지 않았지만 꼬리 응답 시간이 크게 튀었다. 원인은 Linux 4.18 이후 들어간 커밋이었다. 코어별로 남은 약 1ms의 quota가 period 경계에서 만료되도록 바뀌면서, 코어 수가 많은 머신에서 쓰지도 못한 quota가 사라졌다.
+
+저자가 만료 로직을 제거하는 패치를 보냈고, 이 변경은 5.4 이후 메인라인 커널에 들어갔다(4.14, 4.19 stable 등에도 백포트됨). 글은 이 작업으로 한 앱의 최악 응답 지연을 2초 이상에서 30ms로 낮췄다고 밝힌다.
+
+이 사례의 교훈은 두 가지다. 평균 사용률이 낮다고 throttling이 없는 것은 아니다. 그리고 지연이 튈 때는 `cpu.stat`의 `nr_throttled`와 `nr_periods` 비율을 먼저 봐야 한다. 이 사례는 커널 버그였지만, 3절의 병렬도 문제는 버그가 아니라 설계된 동작이다.
+
+---
+
+## 결론
+
+- CFS는 vruntime이 가장 작은 태스크를 먼저 실행해 가중치 비례 공정성을 만든다.
+- CPU limit(`cpu.max`)은 순간 속도가 아니라 period당 누적 사용량을 제한한다. quota를 다 쓰면 CPU가 놀고 있어도 그룹 전체가 멈춘다.
+- 스레드가 많을수록 quota를 빨리 쓴다. quota 100ms에서 4스레드는 25ms 만에 소진하고 75ms를 기다린다.
+- 확인은 `cpu.stat`의 `nr_throttled`/`nr_periods` 비율과 `throttled_usec` 증가로 한다. 평균 사용률 그래프만 봐서는 보이지 않는다.
+
+[다음 글](/posts/cs/os/mutex-semaphore-spinlock)에서는 같은 CPU 시간을 나눠 쓰는 스레드들이 공유 데이터를 함께 건드릴 때 필요한 락을 본다.
+
+---
+
+## 출처
+
+- [Control Group v2 - The Linux Kernel documentation](https://docs.kernel.org/admin-guide/cgroup-v2.html) (cpu.weight, cpu.max, cpu.stat)
+- [CFS Bandwidth Control - The Linux Kernel documentation](https://docs.kernel.org/scheduler/sched-bwc.html) (quota, period, slice)
+- [EEVDF Scheduler - The Linux Kernel documentation](https://docs.kernel.org/scheduler/sched-eevdf.html)
+- [Resource Management for Pods and Containers, Kubernetes](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/)
+- [Indeed Engineering: CPU 제한 throttling 회귀 분석, 1편](https://engineering.indeedblog.com/blog/2019/12/unthrottled-fixing-cpu-limits-in-the-cloud/)
+- [Indeed Engineering: CPU 제한 throttling 회귀 분석, 2편 (수정)](https://engineering.indeedblog.com/blog/2019/12/cpu-throttling-regression-fix/)

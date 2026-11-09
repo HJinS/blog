@@ -1,0 +1,252 @@
+---
+author: 허진수
+pubDatetime: 2026-11-04T05:34:00.000Z
+title: TCP 혼잡 제어 - Slow Start, AIMD, CUBIC, BBR
+featured: false
+draft: false
+tags:
+  - tcp
+  - congestion-control
+  - network
+description: 송신자가 네트워크 상태를 모른 채 cwnd를 키우고 줄이는 원리를 Slow Start, AIMD, CUBIC, BBR 순서로 따라가며, 긴 RTT 경로에서 처리량이 안 나오는 이유를 이해한다.
+---
+
+## 개요
+
+[이전 글](/posts/cs/network/tcp-flow-control-nagle-delayed-ack)에서는 수신자의 버퍼가 넘치지 않게 하는 흐름 제어를 봤다. 그런데 수신자가 "얼마든지 받을 수 있다"고 해도 중간의 라우터 큐가 넘치면 패킷은 버려진다.
+
+이 글은 두 가지를 다룬다.
+
+- 송신자는 네트워크 상태를 모르는데 얼마나 보낼지 어떻게 정하는가
+- RTT 200ms, 1Gbps 경로에서 단일 연결이 수십 Mbps밖에 안 나오는 이유는 무엇인가
+
+---
+
+## 1. 왜 혼잡 제어가 필요한가
+
+흐름 제어(flow control)는 수신자를 보호한다. 혼잡 제어(congestion control)는 **중간 네트워크**(라우터 큐)를 보호한다.
+
+모든 송신자가 "받을 수 있는 만큼 최대한" 보내면 어떻게 될까. 병목 링크의 큐가 가득 차고 패킷이 버려진다. 송신자는 손실을 보고 재전송하고, 재전송이 다시 큐를 채운다. 쓸모없는 재전송만 오가며 실제 처리량이 바닥으로 떨어지는 현상이 혼잡 붕괴(congestion collapse)다. 1980년대 중반 인터넷에서 실제로 일어났고, Van Jacobson이 1988년 논문 "Congestion Avoidance and Control"에서 slow start와 AIMD 윈도우 조절을 제안했다. 이것이 이후 TCP 혼잡 제어의 기초가 됐다.
+
+핵심 아이디어는 한 문장이다. **송신자가 스스로 혼잡 윈도우(cwnd)를 추정해 두고, 그 이상은 보내지 않는다.**
+
+혼잡 윈도우(congestion window, cwnd)는 송신자가 "지금 네트워크에 이만큼은 띄워도 괜찮겠다"고 혼자 추정한 값이다. 수신자가 알려 주는 rwnd와 함께 쓰여서, 실제로 보낼 수 있는 미확인 데이터는 `min(rwnd, cwnd)`로 제한된다. 이 식과 rwnd는 [이전 글](/posts/cs/network/tcp-flow-control-nagle-delayed-ack)에서 봤다. 이 글은 cwnd를 어떻게 키우고 줄이는지만 다룬다.
+
+문제는 네트워크가 "지금 혼잡해요"라고 알려 주지 않는다는 점이다. 송신자는 손실이나 지연 증가 같은 **간접 신호**로 추정해야 한다. 그리고 모든 송신자가 비슷한 규칙을 따라야 전체가 공정하고 안정적으로 수렴한다.
+
+---
+
+## 2. Slow Start: 모르면 조금씩, 그러나 빠르게
+
+연결을 막 시작한 송신자는 경로의 용량을 전혀 모른다. 처음부터 크게 보내면 위험하고, 1개씩 천천히 늘리면 너무 느리다.
+
+Slow Start의 아이디어는 **작게 시작해서 RTT마다 두 배로 키우는 것**이다.
+
+- 시작 cwnd는 초기 윈도우(Initial Window, IW)다. 예전 표준(RFC 3390)은 2~4 세그먼트였고, 실험 RFC인 RFC 6928이 상한을 약 10 세그먼트(최대 14,600바이트)로 올렸다. 현재 Linux 커널의 기본값(`TCP_INIT_CWND`)도 10이다.
+- 새 데이터를 확인하는 ACK 하나마다 cwnd를 1 MSS 늘린다.
+- 한 RTT 동안 cwnd개의 ACK가 돌아오므로 RTT마다 cwnd가 두 배가 된다.
+
+MSS는 한 세그먼트에 담을 수 있는 최대 데이터 크기(Maximum Segment Size)다. 숫자로 따라가면 이렇다.
+
+| RTT | 보낸 세그먼트 수(cwnd) |
+|---|---|
+| 0 | 10 |
+| 1 | 20 |
+| 2 | 40 |
+| 3 | 80 |
+
+이름은 "slow"지만 실제로는 지수 증가다. 느리다는 말은 처음부터 최대로 보내는 방식보다 느리다는 뜻이다.
+
+이 증가는 두 경우 중 하나가 일어나면 멈춘다. 손실이 나거나, cwnd가 임계값 ssthresh(slow start threshold)에 도달하는 경우다.
+
+---
+
+## 3. 혼잡 회피와 손실 반응: AIMD
+
+ssthresh에 도달하면 이제부터는 용량 근처일 수 있다. 지수로 키우면 곧바로 넘친다. 그래서 증가 속도를 선형으로 바꾼다.
+
+**혼잡 회피**(congestion avoidance)는 RTT마다 약 1 MSS씩만 늘린다. ACK마다 MSS의 제곱을 cwnd로 나눈 만큼(약 `MSS*MSS/cwnd`) 늘리면 한 RTT 동안 합계가 1 MSS가 된다.
+
+손실이 생기면 두 가지로 나누어 반응한다.
+
+| 신호 | 의미 | 반응 |
+|---|---|---|
+| 중복 ACK 3개 | 일부 패킷은 지나가고 있다. 가벼운 혼잡 | ssthresh와 cwnd를 절반으로 줄이고 빠른 재전송 후 이어서 진행(fast recovery) |
+| 재전송 타임아웃(RTO) | 거의 아무것도 못 지나간다. 심각한 혼잡 | ssthresh를 절반으로 하고 cwnd를 1 MSS로 되돌려 slow start부터 재시작 |
+
+줄이는 기준은 FlightSize다. FlightSize는 보냈지만 아직 확인받지 못한 데이터의 양으로, 보통 손실 직전의 cwnd와 비슷하다. RFC 5681은 손실이 나면 ssthresh를 FlightSize의 절반으로 내리되 2 MSS보다 작게는 내리지 않는다고 정한다. 아래 코드에서는 단순하게 cwnd의 절반으로 적었다.
+
+정리하면 늘릴 때는 더하고(Additive Increase), 줄일 때는 곱한다(Multiplicative Decrease). 이것이 AIMD다.
+
+Reno 계열의 동작을 코드로 줄이면 다음과 같다.
+
+```
+on ACK(new data):
+  if cwnd < ssthresh: cwnd += MSS               // slow start
+  else:               cwnd += MSS * MSS / cwnd   // congestion avoidance
+on 3 dupACK: ssthresh = max(cwnd/2, 2*MSS); cwnd = ssthresh; retransmit
+on RTO:      ssthresh = max(cwnd/2, 2*MSS); cwnd = 1*MSS   // slow start 재시작
+```
+
+---
+
+## 4. cwnd의 톱니 그래프
+
+위 규칙을 시간 축에 그리면 다음과 같다. 점 하나가 RTT 하나 동안의 cwnd다. 개념도라서 세로 눈금 간격이 일정하지 않고, 혼잡 회피 구간의 증가폭은 눈에 보이게 과장했다. 실제로는 RTT마다 1 MSS씩 오른다.
+
+```
+cwnd (MSS)
+ 48 |                *           *
+ 40 |             *           *
+ 32 |          *           *                          *
+ 24 |                   *                          *
+ 16 |       *                                   *
+  8 |    *                                   *
+  4 | *                                   *
+  2 |                                  *
+  1 |                               *
+    +-----------------------------------------------------> RTT
+      ^--------^  ^--^  ^--------^  ^-----------------^
+      (1)         (2)   (3)         (4)
+```
+
+네 구간을 차례로 읽으면 된다.
+
+1. Slow Start. 초기 윈도우 4에서 시작해 RTT마다 두 배로 오른다. 4, 8, 16, 32다.
+2. 혼잡 회피. ssthresh(여기서는 32)에 닿은 뒤로는 선형으로 오른다.
+3. 48에서 중복 ACK 3개를 만났다. ssthresh와 cwnd를 절반인 24로 내리고, 그 자리에서 다시 선형으로 오른다.
+4. 다시 48에서 이번에는 타임아웃(RTO)을 만났다. ssthresh는 절반인 24가 되고, cwnd는 1 MSS로 떨어진다. 1, 2, 4, 8, 16으로 Slow Start를 다시 하다가 ssthresh 24에 닿으면 혼잡 회피로 넘어간다.
+
+손실이 없다면 cwnd는 한계까지 올라갔다가 손실에서 내려오는 톱니(sawtooth) 모양을 반복한다. 즉 손실 기반 알고리즘은 **한계를 넘어 봐야 한계를 안다.**
+
+---
+
+## 5. 왜 하필 AIMD인가
+
+"늘릴 때 더하고 줄일 때 곱하는" 비대칭이 왜 필요할까. 같은 병목을 두 흐름이 나눠 쓴다고 하고 숫자로 보자. 병목 용량은 100이고, 흐름 A는 60, B는 20에서 출발한다.
+
+| 단계 | A | B | 차이 | 일어난 일 |
+|---|---|---|---|---|
+| 시작 | 60 | 20 | 40 | |
+| +10씩 두 번 | 80 | 40 | 40 | 합이 120이라 용량 초과, 손실 |
+| 둘 다 절반 | 40 | 20 | 20 | |
+| +20씩 | 60 | 40 | 20 | |
+| +10씩 | 70 | 50 | 20 | 합이 120, 손실 |
+| 둘 다 절반 | 35 | 25 | 10 | |
+
+- 더하기로 늘리면 두 흐름이 같은 양씩 늘어나므로 **차이는 그대로**다.
+- 곱하기로 줄이면 큰 흐름이 더 많이 줄어서 **차이가 절반이 된다.**
+- 이를 반복하면 두 흐름은 용량을 반씩 나눠 쓰는 쪽으로 다가간다.
+
+다른 조합은 이렇게 되지 않는다. 곱해서 늘리고 곱해서 줄이면(MIMD) 두 흐름의 비율이 계속 그대로라서 처음의 3:1이 영원히 남는다. 더해서 줄이면(AIAD) 차이가 줄지 않는다.
+
+안정성 측면의 이유도 있다. Jacobson의 1988년 논문은 늘릴 때도 곱하기를 쓰면 윈도우가 크게 출렁이고 평균 처리량이 나빠진다고 설명한다. 네트워크를 포화시키기는 쉽지만 포화에서 회복하기는 어렵기 때문에, 가용 대역폭을 과대평가하는 비용이 크다는 것이다. 그래서 늘릴 때는 작게 일정량씩, 혼잡이 보이면 크게 물러난다.
+
+---
+
+## 6. CUBIC과 BBR: 같은 문제를 다르게 푸는 방법
+
+### Reno의 한계와 CUBIC
+
+Reno는 RTT마다 +1 MSS만 늘린다. BDP(Bandwidth-Delay Product, 대역폭 x RTT)가 큰 경로에서는 손실 한 번 뒤에 원래 윈도우로 돌아오는 데 너무 오래 걸린다. 또 RTT가 짧은 흐름이 같은 시간에 더 많이 늘어 RTT가 긴 흐름이 불리하다.
+
+CUBIC은 마지막 손실 직전의 윈도우 W_max를 기억하고, 손실 후 경과 시간의 3차 함수로 cwnd를 키운다(RFC 9438).
+
+- 손실 직후에는 빠르게 올라간다.
+- W_max 근처에서는 평평하게 조심스럽게 다가간다.
+- W_max를 넘으면 다시 공격적으로 탐색한다.
+
+RFC 9438은 감소 비율 beta를 0.7로 권고한다(Reno는 0.5). 증가가 RTT가 아니라 경과 시간에 의존하므로 RTT가 긴 경로에서도 덜 불리하다. 다만 RTT가 짧고 BDP가 작은 구간에서는 Reno처럼 동작하는 영역이 있다. CUBIC은 Linux를 비롯해 Windows, Apple 스택의 기본 알고리즘이다.
+
+### BBR: 손실 대신 측정한다
+
+Reno와 CUBIC은 둘 다 손실을 혼잡 신호로 쓴다. 그래서 두 가지 문제가 생긴다.
+
+- 버퍼가 크면 손실이 늦게 온다. 그동안 큐가 가득 차서 패킷이 큐에서 기다리는 시간만큼 RTT가 늘어난다. 이 현상을 bufferbloat라고 한다.
+- 무선 구간의 임의 손실을 혼잡으로 오해해 cwnd를 줄인다.
+
+BBR의 한 가지 아이디어는 **손실 대신 병목 대역폭과 최소 RTT를 측정한다**는 것이다.
+
+```
+BDP = 병목 대역폭(BtlBw) x 최소 RTT(RTprop)
+```
+
+BBR은 전송률을 BDP 근처로 유지한다. 파이프를 꽉 채우되 큐는 쌓지 않으려는 것이다. BBR은 Google의 Cardwell 등이 발표했다(CACM, 2017). 논문 초록은 손실 기반 방식이 버퍼가 클 때는 큐를 가득 채워 bufferbloat를 만들고, 버퍼가 작을 때는 손실을 혼잡으로 오해해 처리량이 낮아진다는 점을 문제 삼는다.
+
+```
+손실 기반 (Reno/CUBIC): 큐가 가득 찰 때까지 증가
+  파이프(BDP) + 큐 가득 -> 큐잉 지연 큼 -> 그제서야 손실 -> cwnd 감소
+
+BBR: 전송률을 BDP 근처로 유지
+  파이프(BDP) + 큐 거의 비어 있음 -> 지연 작음
+```
+
+---
+
+## 7. 트레이드오프 정리
+
+| 알고리즘 | 혼잡 신호 | 증가 방식 | 장점 | 알려진 한계 |
+|---|---|---|---|---|
+| Reno | 손실 | RTT당 +1 MSS, 손실 시 x0.5 | 단순한 기준 모델 | 고BDP 경로에서 회복이 느림 |
+| CUBIC | 손실 | W_max 중심 3차 함수 | 고BDP 경로 회복이 빠르고 RTT에 덜 민감 | 큐를 채워야 손실이 나므로 bufferbloat, 임의 손실 오판 |
+| BBR | 대역폭과 최소 RTT 측정 | BDP에 맞춘 pacing(패킷을 몰아 보내지 않고 측정한 속도에 맞춰 일정 간격으로 흘려보내기) | 큐 지연이 작고 임의 손실에 강함 | 손실을 덜 보므로 다른 흐름과의 공정성, 얕은 버퍼의 재전송이 문제로 보고됨 |
+
+BBR 행의 한계는 알려진 논의를 요약한 것이며 버전에 따라 다르다. 도입 환경과 트래픽 구성을 보고 고르는 것이 맞다.
+
+---
+
+## 8. 실전에서 만나는 증상
+
+### 서울-미국 구간에서 처리량이 안 나온다
+
+RTT 200ms, 1Gbps 경로의 BDP는 1Gbps x 0.2초 = 약 25MB다. 단일 연결이 파이프를 채우려면 25MB가 비행 중이어야 한다. 그런데 수신 버퍼나 window scaling 설정이 작거나, cwnd가 느리게 자라거나, 손실이 조금만 있어도 수십 Mbps에 머문다.
+
+손실의 영향은 표준 TCP의 응답 함수(response function)로 어림할 수 있다. RFC 3649는 손실률 $p$에서 Reno 계열 TCP의 평균 cwnd를 다음과 같이 적는다.
+
+$$
+\text{cwnd}_{\text{avg}} \approx \frac{1.2}{\sqrt{p}}
+\qquad
+\text{throughput} \approx \frac{\text{cwnd}_{\text{avg}} \times \text{MSS}}{\text{RTT}}
+$$
+
+여기서 cwnd는 세그먼트 수이고 $p$는 손실률이다.
+
+MSS 1460B, RTT 200ms, 손실률 0.01%($p = 0.0001$)를 넣어 보자. 평균 cwnd는 $1.2 / \sqrt{0.0001} = 1.2 / 0.01 = 120$ 세그먼트이고, 처리량은 $120 \times 1460\text{B} / 0.2\text{s}$ = 약 876KB/s, 즉 약 7Mbps다. 링크가 1Gbps여도 이 흐름은 그 이상 못 낸다. 손실률이 제곱근으로 영향을 주므로 손실이 조금만 있어도 큰 차이가 난다.
+
+대응은 다음과 같다.
+
+- 수신 버퍼 자동 조절과 window scaling 설정 확인
+- CUBIC이나 BBR처럼 고BDP 경로에 강한 알고리즘 사용
+- 병렬 연결로 나누어 전송
+- 손실 원인 제거
+
+### 쉬었다 보내는 첫 큰 응답만 느리다
+
+Linux는 기본적으로 한동안 쉰 연결의 cwnd를 줄인다(`tcp_slow_start_after_idle`, 기본값 1). 커널 문서는 이를 "RFC 2861 동작: 유휴 기간 뒤 혼잡 윈도우를 만료시킨다"고 설명하고, 유휴 기간의 기준은 현재 RTO다. 쉬는 동안 네트워크 상태가 바뀌었을 수 있으니 예전 cwnd를 믿지 않는 것이다. 그래서 풀링된 keep-alive 연결이 한동안 쉬었다가 큰 응답을 보내면 slow start부터 다시 올라가 간헐적으로 느려진다.
+
+### 동시 응답 폭주(incast)
+
+여러 서버가 한 수신자에게 동시에 응답하면 스위치 버퍼가 순간적으로 넘친다. 응답이 짧으면 손실 뒤에 중복 ACK를 만들 세그먼트가 부족해서, 빠른 재전송 대신 타임아웃으로 회복하는 흐름이 많아진다. 타임아웃이 나면 cwnd가 1 MSS로 떨어지고 최소 RTO만큼 쉬므로 처리량이 크게 떨어진다.
+
+---
+
+## 결론
+
+- 흐름 제어는 수신자를, 혼잡 제어는 네트워크를 보호한다. 보낼 수 있는 양은 `min(rwnd, cwnd)`다.
+- 송신자는 네트워크 상태를 모르므로 Slow Start로 지수 탐색하고, 혼잡 회피에서 선형으로 올리다가 손실에서 곱으로 줄이는 AIMD로 공정함과 안정성을 얻는다.
+- 중복 ACK 3개는 절반으로, 타임아웃은 1 MSS로 줄이는 이유는 신호의 심각도가 다르기 때문이다.
+- CUBIC은 W_max 기준 3차 함수로 고BDP 경로의 회복을 빠르게 하고, BBR은 손실 대신 대역폭과 RTT를 측정해 큐를 짧게 유지한다.
+- 느린 전송은 대개 BDP, 윈도우 설정, 작은 손실률, idle 후 cwnd 리셋 중 하나에서 설명된다.
+
+---
+
+## 출처
+
+- [Jacobson, Congestion Avoidance and Control (SIGCOMM '88)](https://www.cs.princeton.edu/courses/archive/fall17/cos561/papers/TCP88.pdf)
+- [RFC 5681 - TCP Congestion Control](https://www.rfc-editor.org/rfc/rfc5681)
+- [RFC 6928 - Increasing TCP's Initial Window](https://www.rfc-editor.org/rfc/rfc6928)
+- [RFC 9438 - CUBIC for Fast and Long-Distance Networks](https://www.rfc-editor.org/rfc/rfc9438)
+- [RFC 3649 - HighSpeed TCP for Large Congestion Windows](https://www.rfc-editor.org/rfc/rfc3649) (5절 표준 TCP 응답 함수 $w = 1.2/\sqrt{p}$)
+- [Linux kernel documentation - IP Sysctl](https://docs.kernel.org/networking/ip-sysctl.html) (`tcp_slow_start_after_idle`)
+- [Linux kernel source - include/net/tcp.h](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/net/tcp.h) (`TCP_INIT_CWND`)
+- [Cardwell et al., BBR: Congestion-Based Congestion Control (CACM, 2017)](https://research.google/pubs/bbr-congestion-based-congestion-control/)

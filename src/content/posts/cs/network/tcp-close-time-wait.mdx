@@ -1,0 +1,407 @@
+---
+author: 허진수
+pubDatetime: 2026-11-04T05:36:00.000Z
+title: "TCP 연결 종료: 4-way, TIME_WAIT, CLOSE_WAIT 누수"
+featured: false
+draft: false
+tags:
+  - network
+  - tcp
+  - linux
+description: TCP가 연결을 네 단계로 닫는 이유와 종료 상태 전이를 따라가고, TIME_WAIT이 쌓여 포트가 고갈되는 경우와 CLOSE_WAIT이 쌓이는 애플리케이션 버그를 구분해 대응하는 법을 이해한다.
+---
+
+## 개요
+
+[TCP 연결 수립 글](/posts/cs/network/tcp-handshake-syn-accept-queue)에서는 3-way handshake로 연결을 여는 과정을 봤다. [앞 글](/posts/cs/network/mtu-mss-pmtud)까지는 열린 연결 위에서 데이터가 어떻게 오가는지를 다뤘다. 이번 글은 연결을 닫는 과정이다.
+
+연결을 여는 쪽보다 닫는 쪽에서 장애가 더 자주 난다. 서버에서 `ss`를 쳐 보면 `TIME-WAIT`이나 `CLOSE-WAIT` 상태의 소켓이 수만 개 보일 때가 있다. 둘 다 "닫히는 중"인 소켓이지만 원인과 대응은 정반대다.
+
+이 글이 답하는 질문은 두 가지다.
+
+- TCP는 왜 연결을 네 단계로 닫고, 먼저 닫은 쪽은 왜 바로 사라지지 않고 TIME_WAIT에 남는가?
+- TIME_WAIT과 CLOSE_WAIT이 많이 쌓였을 때 각각 무엇이 문제이고, 어떻게 확인하고 줄이는가?
+
+---
+
+## 1. 4-way 종료 단계
+
+### 왜 네 단계인가
+
+TCP 연결은 한 줄짜리 통로가 아니다. 클라이언트에서 서버로 가는 방향과 서버에서 클라이언트로 가는 방향, 두 개의 바이트 스트림이 묶여 있다.
+
+그래서 닫을 때도 방향마다 따로 닫는다. 한쪽이 "나는 더 보낼 게 없다"고 알려도, 반대쪽은 아직 보낼 데이터가 남아 있을 수 있다. 예를 들어 클라이언트가 요청을 다 보내고 송신 방향을 닫아도, 서버는 그 뒤에 응답을 끝까지 보내야 한다.
+
+이렇게 한 방향만 닫힌 상태를 **반쯤 닫힘**(half-close)이라고 한다. 한 방향을 닫는 데 FIN 하나와 그에 대한 ACK 하나가 필요하다. 방향이 둘이니 세그먼트가 네 개 오간다.
+
+핵심 아이디어는 한 문장이다. **TCP 종료는 두 방향을 각각 FIN과 ACK로 닫는 일이고, 그래서 4-way가 된다.**
+
+### 단계별로 따라가기
+
+먼저 `close()`를 부르는 쪽을 **능동 종료**(active close) 쪽, FIN을 먼저 받는 쪽을 **수동 종료**(passive close) 쪽이라고 부른다. 클라이언트든 서버든 먼저 닫는 쪽이 능동 종료 쪽이다.
+
+클라이언트 `10.0.0.1:50000`이 서버 `10.0.0.5:443`과의 연결을 먼저 닫는 경우를 보자. 시퀀스 번호는 예시 값이다.
+
+```
+Client 10.0.0.1:50000 (active)          Server 10.0.0.5:443 (passive)
+
+ESTABLISHED                             ESTABLISHED
+     |                                       |
+     | --- (1) FIN  seq=1000 --------------> |
+FIN_WAIT_1                              CLOSE_WAIT
+     | <-- (2) ACK  ack=1001 --------------- |
+FIN_WAIT_2                                   |
+     | <-- (data the server still sends) --- |
+     | <-- (3) FIN  seq=5000 --------------- |
+                                        LAST_ACK
+TIME_WAIT                                    |
+     | --- (4) ACK  ack=5001 --------------> |
+     |                                  CLOSED
+     |  wait 2MSL (Linux: 60s)
+CLOSED
+```
+
+1. 클라이언트가 `close()`를 부른다. 커널은 FIN(seq=1000)을 보내고 FIN_WAIT_1 상태가 된다. FIN은 "이 방향으로는 더 보낼 데이터가 없다"는 표시다.
+2. 서버 커널이 FIN을 받고 ACK(ack=1001)를 보낸다. FIN도 시퀀스 번호를 1 차지하기 때문에 1000이 아니라 1001을 확인한다. 서버는 CLOSE_WAIT 상태가 되고, 클라이언트는 ACK를 받아 FIN_WAIT_2가 된다.
+3. 이제 클라이언트에서 서버로 가는 방향만 닫혔다. 서버는 남은 데이터를 계속 보낼 수 있다. 서버 애플리케이션이 `close()`를 부르면 서버 커널이 FIN(seq=5000)을 보내고 LAST_ACK 상태가 된다.
+4. 클라이언트가 FIN에 ACK(ack=5001)를 보내고 TIME_WAIT 상태가 된다. 서버는 이 ACK를 받으면 바로 CLOSED가 된다. 클라이언트는 2MSL 동안 기다린 뒤에야 CLOSED가 된다.
+
+### 실제로는 세 개만 보일 때도 있다
+
+서버가 FIN을 받자마자 바로 `close()`를 하면 (2)의 ACK와 (3)의 FIN이 한 세그먼트(FIN+ACK)로 합쳐질 수 있다. 그러면 패킷 캡처에는 세그먼트가 세 개만 보인다. 그래도 두 방향을 따로 닫는다는 구조는 같다.
+
+여기서 눈여겨볼 점이 두 가지 있다.
+
+- (2)와 (3) 사이의 시간은 **서버 애플리케이션**이 정한다. 커널은 ACK까지만 자동으로 보내고, FIN은 애플리케이션이 `close()`를 불러야 나간다. 5장의 CLOSE_WAIT 누수가 여기서 생긴다.
+- 기다림은 **먼저 닫은 쪽**만 진다. 수동 종료 쪽은 마지막 ACK를 받으면 바로 끝나지만, 능동 종료 쪽은 TIME_WAIT에 남는다. 4장의 포트 고갈이 여기서 생긴다.
+
+---
+
+## 2. 종료 쪽 상태 전이도
+
+### 왜 상태 이름을 알아야 하는가
+
+`ss`나 `netstat`은 소켓마다 상태 이름을 보여 준다. 이 이름만 보고도 "누가 먼저 닫았고, 지금 누구를 기다리는 중인지"를 알 수 있다. 장애를 볼 때 가장 먼저 쓰는 단서다.
+
+핵심 아이디어는 한 문장이다. **ESTABLISHED에서 나가는 길은 둘이고, 내가 먼저 `close()`를 했는지 FIN을 먼저 받았는지에 따라 갈린다.**
+
+### 전이도
+
+RFC 9293의 상태 전이도에서 종료 부분만 떼어 오면 다음과 같다. 왼쪽이 능동 종료 쪽, 오른쪽이 수동 종료 쪽이다. 화살표 옆의 글은 "이 사건이 일어나면 / 이것을 보낸다"는 뜻이다.
+
+```
+          active closer                       passive closer
+
+         +-------------+                     +-------------+
+         | ESTABLISHED |                     | ESTABLISHED |
+         +-------------+                     +-------------+
+                |  close() / send FIN               |  recv FIN / send ACK
+                v                                   v
+         +-------------+                     +-------------+
+         | FIN_WAIT_1  |                     | CLOSE_WAIT  |
+         +-------------+                     +-------------+
+                |  recv ACK                         |  close() / send FIN
+                v                                   v
+         +-------------+                     +-------------+
+         | FIN_WAIT_2  |                     |  LAST_ACK   |
+         +-------------+                     +-------------+
+                |  recv FIN / send ACK              |  recv ACK
+                v                                   v
+         +-------------+                     +-------------+
+         |  TIME_WAIT  |                     |   CLOSED    |
+         +-------------+                     +-------------+
+                |  timeout 2MSL
+                v
+         +-------------+
+         |   CLOSED    |
+         +-------------+
+
+ simultaneous close (both sides call close() at the same time):
+   FIN_WAIT_1 -> (recv FIN / send ACK) -> CLOSING -> (recv ACK) -> TIME_WAIT
+```
+
+### 상태마다 무엇을 기다리는가
+
+| 상태 | 쪽 | 무엇을 기다리는가 | 오래 남으면 의심할 것 |
+|---|---|---|---|
+| FIN_WAIT_1 | 능동 | 내 FIN에 대한 ACK | 상대가 응답하지 않거나 네트워크 문제 |
+| FIN_WAIT_2 | 능동 | 상대의 FIN | 상대 애플리케이션이 `close()`를 안 함 |
+| TIME_WAIT | 능동 | 시간이 지나는 것(2MSL) | 정상. 개수가 문제일 때만 4장 |
+| CLOSE_WAIT | 수동 | **내 애플리케이션**의 `close()` | 내 코드의 close 누락(5장) |
+| LAST_ACK | 수동 | 내 FIN에 대한 ACK | 상대가 사라졌거나 네트워크 문제 |
+| CLOSING | 양쪽 | 내 FIN에 대한 ACK | 드묾. 동시 종료 중 |
+
+두 상태가 짝을 이룬다는 점이 중요하다. 내 쪽이 CLOSE_WAIT이면 상대는 FIN_WAIT_2에 있다. 상대가 FIN_WAIT_2에 오래 머문다면, 그 원인은 상대가 아니라 CLOSE_WAIT에 있는 내 쪽이다.
+
+---
+
+## 3. TIME_WAIT이 2MSL 동안 남는 두 가지 이유
+
+### 왜 바로 닫으면 안 되는가
+
+4번째 ACK를 보냈으면 능동 종료 쪽은 할 일이 끝난 것처럼 보인다. 그런데 RFC 9293은 능동 종료 쪽이 TIME_WAIT에 2MSL 동안 머물러야 한다고(MUST) 정한다.
+
+**MSL**(maximum segment lifetime)은 세그먼트 하나가 네트워크 안에서 살아 있을 수 있는 최대 시간이다. RFC 9293은 MSL을 2분으로 잡는다. 그러면 2MSL은 4분이다. Linux는 이 값을 따르지 않고 TIME_WAIT 길이를 60초로 고정해 두었다(커널 상수 `TCP_TIMEWAIT_LEN`).
+
+핵심 아이디어는 한 문장이다. **TIME_WAIT은 "이 연결에 속한 세그먼트가 네트워크에서 모두 사라질 때까지" 연결의 흔적을 남겨 두는 장치다.** 이유는 두 가지다.
+
+### 이유 1: 마지막 ACK가 사라질 수 있다
+
+1장의 (4) ACK가 중간에 유실됐다고 하자.
+
+```
+Client (active)                         Server (passive)
+TIME_WAIT                               LAST_ACK
+     | --- (4) ACK ----X  (lost)             |
+     |                                       |  no ACK -> retransmit FIN
+     | <-- (3') FIN (retransmitted) -------- |
+     | --- (4') ACK -----------------------> |
+     |  restart 2MSL timer              CLOSED
+```
+
+- 클라이언트가 TIME_WAIT에 남아 있으면, 재전송된 FIN에 다시 ACK를 보내면 된다. RFC 9293은 이때 2MSL 타이머를 처음부터 다시 시작하라고 정한다.
+- 클라이언트가 이미 연결 정보를 지웠다면, 모르는 연결에서 FIN이 온 셈이다. 클라이언트는 RST(연결 강제 종료 신호)로 답한다. 서버는 정상 종료 대신 에러를 받는다.
+
+시간이 2MSL인 이유도 여기서 나온다. 내 ACK가 상대에게 가는 데 최대 MSL, 상대가 재전송한 FIN이 돌아오는 데 최대 MSL이 걸린다. 둘을 합치면 2MSL이다.
+
+### 이유 2: 지난 연결의 늦은 세그먼트가 새 연결에 섞일 수 있다
+
+TCP 연결은 **4-tuple**(출발지 IP, 출발지 포트, 목적지 IP, 목적지 포트)로 구분한다. 같은 4-tuple로 새 연결을 열면, 커널 입장에서는 이전 연결과 이름이 같은 연결이다.
+
+```
+time   event
+----   --------------------------------------------------------------
+ t1    old conn 10.0.0.1:50000 -> 10.0.0.5:443 sends data seq=3000
+       (this segment gets stuck in a slow router)
+ t2    old conn closes
+ t3    new conn opens with the SAME 4-tuple
+ t4    the stuck segment (seq=3000) finally arrives
+       -> if seq=3000 falls inside the new conn's window,
+          it is accepted as new data  (corruption)
+```
+
+이전 연결에서 길을 잃고 늦게 도착한 세그먼트를 **오래된 중복**(old duplicate)이라고 부른다. 시퀀스 번호가 우연히 새 연결의 수신 범위 안에 들어가면, 수신 쪽은 이 세그먼트를 새 연결의 데이터로 받아들인다. 받은 데이터가 조용히 오염된다.
+
+TIME_WAIT은 이 4-tuple을 2MSL 동안 묶어 둔다. 그동안은 같은 4-tuple로 새 연결을 열 수 없다. 2MSL이 지나면 양방향의 오래된 세그먼트는 모두 수명이 다해 사라졌다고 볼 수 있다.
+
+### 그래서 TIME_WAIT 자체는 정상이다
+
+TIME_WAIT은 버그가 아니라 TCP가 일부러 넣은 안전장치다. 애플리케이션은 이미 `close()`를 했으므로 TIME_WAIT 연결은 파일 디스크립터를 차지하지 않는다. Linux는 이 상태의 연결을 일반 소켓 대신 별도의 TIME_WAIT 전용 구조체(`inet_timewait_sock`)로 바꿔 들고 있다. 커널 소스의 주석은 이 구조체가 부하가 큰 서버에서 TIME_WAIT 소켓의 메모리 소비 문제를 피하려고 만든 것이라고 설명한다. 그래서 수만 개가 있어도 그 자체로는 큰 문제가 아니다.
+
+자주 하는 오해도 하나 짚고 넘어가자. `net.ipv4.tcp_fin_timeout`은 이름과 달리 TIME_WAIT 길이를 바꾸지 않는다. Linux 문서에 따르면 이 값은 애플리케이션이 이미 놓아 버린 소켓이 **FIN_WAIT_2**에 머무는 최대 시간이다(기본 60초). TIME_WAIT의 60초는 커널에 박힌 상수라서 sysctl로 줄일 수 없다.
+
+---
+
+## 4. TIME_WAIT이 문제가 되는 경우
+
+### 서버 쪽 TIME_WAIT은 대개 괜찮다
+
+서버가 먼저 닫으면 서버에 TIME_WAIT이 쌓인다. 그래도 서버는 대개 버틴다. 서버 쪽 4-tuple은 `서버IP:443`이 고정이고, 클라이언트 IP와 포트가 계속 바뀐다. TIME_WAIT 하나가 막는 것은 "그 클라이언트의 그 포트" 하나뿐이다.
+
+### 클라이언트 쪽은 포트가 고갈된다
+
+문제는 **한 클라이언트가 같은 목적지로 짧은 연결을 많이 열 때**다. 프록시, API 게이트웨이, 다른 서비스를 호출하는 백엔드, 부하 테스트 도구가 여기에 해당한다.
+
+클라이언트가 `connect()`를 하면 커널이 출발지 포트를 자동으로 골라 준다. 이렇게 잠깐 쓰고 버리는 포트를 **임시 포트**(ephemeral port)라고 한다. Linux에서 범위는 `net.ipv4.ip_local_port_range`이고 기본값은 32768~60999, 즉 28,232개다.
+
+목적지가 `10.0.0.5:443` 하나로 같다면, 4-tuple에서 바뀔 수 있는 것은 출발지 포트뿐이다. 계산해 보자.
+
+| 항목 | 값 |
+|---|---|
+| 쓸 수 있는 임시 포트 | 60999 - 32768 + 1 = 28,232개 |
+| 포트 하나가 TIME_WAIT에 묶이는 시간 | 60초 |
+| 같은 목적지로 버틸 수 있는 새 연결 속도 | 28,232 / 60 = 약 470개/초 |
+
+요청마다 새 연결을 열고 클라이언트가 먼저 닫는 서비스가 초당 1,000번 같은 서버를 호출한다고 하자. TIME_WAIT은 초당 1,000개씩 쌓이고 60초 뒤에야 풀린다. 약 28초 만에 임시 포트가 바닥난다. 그 뒤로 `connect()`는 `EADDRNOTAVAIL`(Cannot assign requested address) 에러로 실패한다. connect(2) 맨페이지는 이 에러를 "임시 포트 범위의 모든 포트가 사용 중"인 경우로 설명한다.
+
+이 증상은 서버가 아니라 **호출하는 쪽**에서 난다. 서버 CPU와 메모리는 멀쩡한데 클라이언트가 연결을 못 여는 형태라서 원인을 찾기 어렵다.
+
+### 확인하는 방법
+
+```bash
+# TIME_WAIT 소켓 수
+ss -tan state time-wait | wc -l
+
+# 목적지별로 몇 개씩 쌓였는지 (상위 목적지 확인)
+ss -tan state time-wait | awk 'NR>1 {print $4}' | sort | uniq -c | sort -rn | head
+
+# 임시 포트 범위
+sysctl net.ipv4.ip_local_port_range
+```
+
+### 줄이는 방법 (권하는 순서대로)
+
+1. **연결을 재사용한다.** 근본 해법이다. 새 연결을 안 만들면 TIME_WAIT도 안 생긴다. 6장에서 자세히 다룬다.
+2. **포트 범위를 넓힌다.** 예를 들어 `ip_local_port_range`를 `1024 65535`로 넓히면 포트가 두 배 남짓 늘어난다. 다만 그 범위 안의 포트를 쓰는 다른 서비스와 겹치지 않는지 확인해야 한다. 근본 해법은 아니고 한계를 조금 미룰 뿐이다.
+3. **목적지나 출발지를 늘린다.** 4-tuple의 다른 칸이 바뀌면 포트를 따로 셀 수 있다. 백엔드 IP를 여러 개 두거나 클라이언트에 IP를 더 붙이는 방법이다.
+4. **`tcp_tw_reuse`를 켠다.** 아래에서 조건을 본다.
+
+### `tcp_tw_reuse`: 조건부로 TIME_WAIT 포트를 다시 쓰기
+
+`net.ipv4.tcp_tw_reuse`는 "프로토콜 관점에서 안전할 때" TIME_WAIT 소켓을 새 연결에 다시 쓰게 해 주는 설정이다. 값은 세 가지다.
+
+| 값 | 의미 |
+|---|---|
+| 0 | 끈다 |
+| 1 | 모든 트래픽에 켠다 |
+| 2 | 루프백(loopback) 트래픽에만 켠다 (기본값) |
+
+이 설정은 3장의 두 위험을 무시하는 게 아니다. TCP **타임스탬프 옵션**(RFC 7323)으로 위험을 대신 막는다. 타임스탬프 옵션은 세그먼트마다 보낸 시각 값을 붙이는 기능이다([TCP 신뢰성 글](/posts/cs/network/tcp-reliability-retransmission)에서 RTT 측정 용도로 처음 나왔다). 수신 쪽은 이 값이 직전보다 오래된 세그먼트를 버린다. 이 검사를 **PAWS**(Protection Against Wrapped Sequence numbers)라고 한다. 오래된 중복은 타임스탬프가 옛날 값이라서 PAWS에 걸려 버려진다.
+
+그래서 커널 코드를 보면 재사용 조건이 이렇다.
+
+- **나가는 연결**에만 적용된다. 내가 `connect()`로 새 연결을 만들며 출발지 포트를 고를 때 쓰인다. 서버가 받는 연결에는 해당하지 않는다.
+- 이전 연결에서 **타임스탬프를 썼어야** 한다. 타임스탬프가 없으면 PAWS로 보호할 수 없으니 재사용하지 않는다.
+- TIME_WAIT에 들어간 지 `tcp_tw_reuse_delay`(기본 1000ms)가 지나야 한다.
+
+Linux 문서는 이 값을 "전문가의 조언 없이 바꾸지 말라"고 적어 두었다. 켜기 전에 연결 재사용으로 해결할 수 없는지 먼저 본다.
+
+### 하면 안 되는 것: `tcp_tw_recycle`, `SO_LINGER` 0
+
+오래된 튜닝 글에는 `net.ipv4.tcp_tw_recycle=1`을 켜라는 조언이 자주 나온다. 이 설정은 **Linux 4.12에서 제거됐다.** 지금 커널에서는 이 sysctl 자체가 없다.
+
+제거된 이유는 커밋 메시지에 그대로 나와 있다.
+
+- `tcp_tw_recycle`은 **상대 IP별로** 마지막 타임스탬프를 기억하고, 그보다 작은 타임스탬프가 붙은 SYN을 버렸다.
+- NAT 뒤에 있는 여러 기기는 IP 하나를 함께 쓴다. 기기마다 타임스탬프 시계가 다르니, IP 하나에서 오는 타임스탬프가 들쭉날쭉하다. 그 결과 정상 클라이언트의 연결 요청이 조용히 버려졌다.
+- 이후 커널이 연결마다 타임스탬프 시작값을 무작위로 바꾸게 되면서(timestamp offset randomization), NAT가 아니어도 같은 문제가 생겼다. 기능이 사실상 동작하지 않게 되어 제거됐다.
+
+`SO_LINGER`를 타임아웃 0으로 걸고 닫는 방법도 있다. 이러면 FIN 대신 RST를 보내 연결을 즉시 끊고 TIME_WAIT을 건너뛴다. 하지만 아직 보내지 못한 데이터는 버려지고, 상대는 정상 종료가 아니라 연결 리셋 에러를 받는다. 3장의 안전장치도 함께 사라진다. 장애 대응용 임시방편 이상으로 쓰지 않는다.
+
+---
+
+## 5. CLOSE_WAIT 누수
+
+### 왜 생기는가
+
+1장에서 본 것처럼, 상대의 FIN을 받으면 커널은 ACK까지만 자동으로 보낸다. 내 쪽의 FIN은 **애플리케이션이 `close()`를 불러야** 나간다. 그 사이 소켓은 CLOSE_WAIT에 있다.
+
+RFC 9293의 상태 처리에도 CLOSE_WAIT에서 나가는 길은 사용자의 CLOSE 호출 하나뿐이다. 이 상태에는 시간 제한이 없다. 애플리케이션이 `close()`를 잊으면 소켓은 프로세스가 끝날 때까지 CLOSE_WAIT에 남는다.
+
+핵심 아이디어는 한 문장이다. **TIME_WAIT이 많은 것은 대개 정상이지만, CLOSE_WAIT이 계속 늘어나는 것은 거의 항상 내 코드의 버그다.**
+
+### 단계별로: 어떻게 쌓이는가
+
+흔한 경우는 "상대가 먼저 닫았는데 내가 모르는" 상황이다.
+
+1. 내 서비스가 HTTP 클라이언트로 서버 `10.0.0.5:8080`을 호출한다.
+2. 서버가 응답을 보내고, 그 연결을 먼저 닫는다(서버의 유휴 타임아웃 등). 서버는 FIN을 보낸다.
+3. 내 커널은 ACK를 보내고 소켓을 CLOSE_WAIT으로 바꾼다. 여기까지는 커널이 한다.
+4. 내 코드가 예외 경로에서 응답 객체를 닫지 않았다. 소켓은 아무도 닫지 않는 채 남는다.
+5. 요청이 올 때마다 이 일이 반복된다. CLOSE_WAIT은 줄지 않고 계속 늘어난다.
+
+```java
+// 문제: 예외가 나면 close()에 도달하지 못한다
+HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+InputStream in = conn.getInputStream();
+String body = readAll(in);       // 여기서 예외 -> in.close()가 실행되지 않음
+in.close();
+
+// 해결: try-with-resources로 어떤 경로든 닫히게 한다
+try (InputStream in2 = conn.getInputStream()) {
+    String body2 = readAll(in2);
+}
+```
+
+Go라면 `resp.Body.Close()`를 빠뜨리는 것이 대표적이다. 언어가 달라도 원인은 같다. 소켓을 쥐고 있는 객체를 모든 경로에서 닫지 않은 것이다.
+
+### 무엇이 문제인가
+
+- **파일 디스크립터 고갈.** 프로세스가 열어 둔 파일과 소켓은 번호로 관리되고, 이를 **파일 디스크립터**(file descriptor)라고 한다. CLOSE_WAIT 소켓은 이 번호를 계속 쥐고 있다. 프로세스 한도(`ulimit -n`)에 닿으면 새 연결도 파일 열기도 `Too many open files`로 실패한다.
+- **커넥션 풀 오염.** 풀에 이미 상대가 닫은 연결이 남아 있으면, 그 연결로 보낸 요청은 RST나 에러를 받는다. 간헐적인 연결 에러로 보인다.
+- **상대 쪽 자원.** 짝이 되는 상대 소켓은 FIN_WAIT_2에 있다. Linux는 애플리케이션이 놓아 버린 FIN_WAIT_2 소켓을 `tcp_fin_timeout`(기본 60초) 뒤에 정리하므로, 대개 상대보다 내 쪽 피해가 더 크다.
+
+### 확인하는 방법
+
+```bash
+# CLOSE_WAIT 소켓 수
+ss -tan state close-wait | wc -l
+
+# 어느 상대와의 연결이 쌓였는지
+ss -tan state close-wait | awk 'NR>1 {print $4}' | sort | uniq -c | sort -rn | head
+
+# 어느 프로세스가 쥐고 있는지 (root 권한이면 다른 사용자 프로세스도 보인다)
+ss -tanp state close-wait
+```
+
+진단할 때 두 가지를 본다.
+
+- **추세.** 몇 분 간격으로 개수를 세어 본다. 늘었다 줄었다 하면 처리 중인 연결이다. 계속 늘기만 하면 누수다.
+- **상대 주소.** 특정 상대(예: 한 DB나 한 외부 API)에 몰려 있다면, 그 상대를 호출하는 코드의 close 경로를 먼저 의심한다.
+
+CLOSE_WAIT은 커널 설정으로 해결되지 않는다. 시간 제한이 없으니 sysctl로 줄일 값도 없다. 프로세스를 재시작하면 일단 사라지지만 다시 쌓인다. 고칠 곳은 코드다.
+
+### TIME_WAIT과 CLOSE_WAIT 비교
+
+| | TIME_WAIT | CLOSE_WAIT |
+|---|---|---|
+| 어느 쪽에 생기나 | 먼저 닫은 쪽 | 나중에 닫는 쪽 |
+| 누가 끝내나 | 커널 타이머(Linux 60초) | 애플리케이션의 `close()` |
+| 많이 쌓이면 | 대개 정상. 클라이언트라면 포트 고갈 주의 | 거의 항상 버그 |
+| 파일 디스크립터 | 차지하지 않음 | 차지함 |
+| 대응 | 연결 재사용, 포트 범위, `tcp_tw_reuse` | 코드에서 close 누락 수정 |
+
+---
+
+## 6. 커넥션 풀과 keep-alive로 줄이기
+
+### 왜 필요한가
+
+4장의 포트 고갈은 결국 "연결을 너무 자주 새로 만든다"에서 나온다. 연결 하나를 새로 만들 때마다 3-way handshake로 1 RTT가 들고, TLS를 쓰면 그 위에 핸드셰이크가 더 붙는다. 닫을 때마다 한쪽에 TIME_WAIT이 하나 남는다.
+
+핵심 아이디어는 한 문장이다. **연결을 닫지 않고 다음 요청에 다시 쓰면, 종료 자체가 드물어져 TIME_WAIT도 handshake 비용도 함께 줄어든다.**
+
+### 두 가지 도구
+
+**HTTP keep-alive**(persistent connection, 지속 연결)는 요청 하나가 끝나도 TCP 연결을 닫지 않고 다음 요청에 다시 쓰는 방식이다. RFC 9112에 따르면 HTTP/1.1은 기본이 지속 연결이다.
+
+**커넥션 풀**(connection pool)은 클라이언트가 열린 연결 여러 개를 모아 두고, 요청마다 빌려 썼다가 돌려받는 구조다. DB 드라이버와 HTTP 클라이언트 라이브러리 대부분이 풀을 제공한다.
+
+TCP keepalive와 헷갈리지 않도록 주의한다. **TCP keepalive**(`SO_KEEPALIVE`)는 오래 조용한 연결에 빈 확인 패킷을 보내 상대가 살아 있는지 보는 기능이다. Linux 기본값으로는 2시간 동안 조용해야 첫 확인을 보낸다. 연결 재사용과는 다른 기능이다.
+
+### 숫자로 비교
+
+4장의 예시, 같은 서버로 초당 1,000번 호출하는 경우를 다시 보자.
+
+| 방식 | 초당 새 연결 | 쌓이는 TIME_WAIT (60초 기준) | 포트 고갈 |
+|---|---|---|---|
+| 요청마다 연결 | 1,000 | 약 60,000 (포트 28,232개로는 불가) | 약 28초 뒤 |
+| 풀 50개, keep-alive | 거의 0 | 풀 연결이 교체될 때만 생김 | 없음 |
+
+풀을 쓰면 연결 50개가 1,000 rps를 나눠 처리한다. 연결 하나가 초당 20개 요청을 처리하는 셈이다. 새 연결과 종료는 풀이 연결을 교체할 때만 일어난다.
+
+### 생기는 문제와 설정 포인트
+
+연결을 오래 들고 있으면 새 문제가 생긴다. 5장의 "상대가 먼저 닫았는데 풀이 모르는" 상황이다.
+
+- **유휴 타임아웃 순서를 맞춘다.** 서버는 보통 조용한 연결을 일정 시간 뒤에 닫는다. 클라이언트 풀의 유휴 타임아웃을 서버의 keep-alive 타임아웃보다 **짧게** 잡으면, 서버가 닫기 전에 클라이언트가 먼저 정리한다. 반대면 서버가 막 닫은 연결을 풀이 빌려줘서 요청이 실패하고, 정리되지 않은 연결이 CLOSE_WAIT으로 남는다.
+- **꺼낼 때 검증한다.** 많은 풀은 빌려주기 전에 연결이 살아 있는지 확인하는 옵션을 준다. 비용이 조금 들지만 죽은 연결을 걸러 낸다.
+- **풀 크기에 상한을 둔다.** 풀이 커지면 서버 쪽 동시 연결 수가 늘어난다. 서버의 연결 한도와 함께 정한다.
+- **부하 분산이 치우칠 수 있다.** 연결을 오래 재사용하면 L4 로드밸런서는 연결이 처음 붙은 백엔드로 계속 보낸다. 새 백엔드를 추가해도 트래픽이 바로 옮겨 가지 않는다. 연결 최대 수명을 두어 주기적으로 교체하는 방법을 쓴다.
+
+HTTP/2는 연결 하나에 여러 요청을 동시에 실어 보내서 필요한 연결 수를 더 줄인다. 다만 TCP 위에서 돌기 때문에 패킷 하나가 유실되면 그 연결의 모든 요청이 함께 멈춘다. HTTP/3는 TCP 대신 UDP 위의 QUIC로 이 문제를 푼다. 이 내용은 [HTTP/2 vs HTTP/3(QUIC) 글](/posts/cs/network/http2-vs-http3-quic)에서 다룬다.
+
+---
+
+## 결론
+
+- TCP는 두 방향을 각각 FIN과 ACK로 닫기 때문에 종료가 4-way다. 먼저 닫는 쪽은 FIN_WAIT_1, FIN_WAIT_2, TIME_WAIT을 지나고, 나중에 닫는 쪽은 CLOSE_WAIT, LAST_ACK을 지난다.
+- TIME_WAIT은 마지막 ACK 유실에 대비하고 오래된 중복 세그먼트가 새 연결에 섞이지 않게 하는 안전장치다. RFC 9293은 2MSL(MSL 2분)을 요구하고, Linux는 60초로 고정해 둔다.
+- TIME_WAIT이 문제가 되는 곳은 대개 같은 목적지로 짧은 연결을 많이 여는 클라이언트다. 임시 포트 28,232개를 60초씩 묶으면 초당 약 470개가 한계다. 연결 재사용이 근본 해법이고, `tcp_tw_reuse`는 타임스탬프를 전제로 한 보조 수단이다. `tcp_tw_recycle`은 Linux 4.12에서 제거됐다.
+- CLOSE_WAIT은 시간 제한이 없고 애플리케이션의 `close()`로만 빠져나온다. 계속 늘어나면 커널이 아니라 코드의 close 누락을 찾는다.
+
+다음 글에서는 이렇게 맺고 끊는 TCP 연결 위에 암호화 계층을 얹는 [TLS 1.3 핸드셰이크](/posts/cs/network/tls13-handshake)를 다룬다.
+
+---
+
+## 출처
+
+- RFC 9293, "Transmission Control Protocol (TCP)", 2022. 3.3.2 상태 전이도, 3.4.2 MSL, 3.6 연결 종료, 3.6.1 TIME-WAIT, 3.10.7.4 세그먼트 도착 처리: https://www.rfc-editor.org/rfc/rfc9293.html
+- Linux kernel documentation, "IP Sysctl" (`tcp_tw_reuse`, `tcp_tw_reuse_delay`, `tcp_fin_timeout`, `ip_local_port_range`, `tcp_keepalive_time`): https://docs.kernel.org/networking/ip-sysctl.html
+- Linux kernel commit 4396e46187ca, "tcp: remove tcp_tw_recycle" (Linux 4.12에 포함): https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=4396e46187ca5070219b81773c4e65088dac50cc
+- Kernel Newbies, "Linux 4.12" 변경 목록의 "TCP: remove tcp_tw_recycle sysctl": https://kernelnewbies.org/Linux_4.12
+- Linux kernel source, `include/net/inet_timewait_sock.h` (TIME_WAIT 전용 구조체): https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/net/inet_timewait_sock.h
+- connect(2) Linux manual page (`EADDRNOTAVAIL`): https://man7.org/linux/man-pages/man2/connect.2.html
+- RFC 7323, "TCP Extensions for High Performance" (타임스탬프, PAWS): https://www.rfc-editor.org/rfc/rfc7323.html
+- RFC 9112, "HTTP/1.1" (9.3 Persistence): https://www.rfc-editor.org/rfc/rfc9112.html
+- Linux kernel source, `include/net/tcp.h`의 `TCP_TIMEWAIT_LEN` 정의와 `net/ipv4/tcp_ipv4.c`의 `tcp_twsk_unique()`: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/net/ipv4/tcp_ipv4.c

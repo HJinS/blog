@@ -166,10 +166,11 @@ Kleppmann의 결론(그리고 지금 실무에서 받아들여지는 원칙)은 
 
 **방법 B: Probabilistic Early Expiration (X-Fetch)**
 락을 아예 쓰지 않고, 만료 시점이 다가올수록 "지금 미리 재계산할 확률"을 높여서 여러 요청 중 극소수만 먼저 재계산을 트리거하는 방식.
-```
-Gap = CurrentTime - (TimeToCompute × β × ln(Random(0,1)))
-Gap >= ExpiryTime 이면 재계산
-```
+$$
+\text{Gap} = \text{CurrentTime} - \text{TimeToCompute} \times \beta \times \ln\left(\text{Random}(0,1)\right)
+$$
+
+$\text{Gap} \ge \text{ExpiryTime}$이면 재계산한다.
 
 **실측 비교치**: 10,000 동시 요청 기준, X-Fetch(β=1.0, TTL 60s)는 DB 쿼리 3~5회, p50 12ms, DB CPU 2%. 반면 mutex 락은 DB 쿼리 1회로 더 적지만 락 대기 때문에 p50이 580ms까지 올라감.
 
@@ -248,3 +249,11 @@ Kafka와 가장 유사한 Redis 기능. List 기반 큐(`LPUSH`/`BRPOP`)나 Pub/
 
 **개념 학습**
 - Martin Kleppmann, *Designing Data-Intensive Applications* — 캐시/1차 저장소의 역할 구분, durability/isolation 개념을 가장 체계적으로 다루는 책.
+
+---
+
+## 관련 글
+
+- [해시 테이블: 충돌 처리, 리사이즈, 그리고 hash flooding](/posts/cs/algorithm/hash-table)
+- [LRU 캐시 직접 설계: 해시맵과 이중 연결 리스트](/posts/cs/algorithm/lru-cache-design)
+- [확률적 자료구조: Skip List, Bloom filter, HyperLogLog](/posts/cs/algorithm/probabilistic-data-structures)

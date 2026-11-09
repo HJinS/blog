@@ -1,0 +1,252 @@
+---
+author: 허진수
+pubDatetime: 2026-11-04T05:31:00.000Z
+title: TCP 연결 수립과 SYN queue, accept queue
+featured: false
+draft: false
+tags:
+  - network
+  - tcp
+  - linux
+description: TCP 서버가 3-way handshake 도중과 직후에 연결을 어떤 큐에 보관하는지, 큐가 넘치면 어떤 증상이 나오는지, ss -lnt의 Recv-Q와 Send-Q를 어떻게 읽는지 이해한다.
+---
+
+## 개요
+
+서버 CPU는 한가한데 클라이언트 일부가 정확히 1초, 3초, 7초 뒤에 응답을 받는다. 에러 로그에는 아무것도 없다. 이런 증상의 원인이 커널 안의 작은 큐일 때가 있다.
+
+이 글이 답하는 질문은 두 가지다.
+
+- TCP 서버는 3-way handshake 중인 연결과 끝난 연결을 어디에 보관하는가?
+- 그 큐가 가득 차면 클라이언트에게 무슨 일이 생기고, `ss -lnt`로 어떻게 확인하는가?
+
+이 글은 TCP 시리즈의 두 번째 글이다. 연결이 만들어진 뒤 데이터가 유실될 때 어떻게 복구하는지는 [TCP 신뢰성과 재전송](/posts/cs/network/tcp-reliability-retransmission)에서 다룬다.
+
+---
+
+## 1. 왜 큐가 필요한가
+
+TCP 연결은 3-way handshake로 시작한다.
+
+1. 클라이언트가 `SYN`을 보낸다.
+2. 서버가 `SYN+ACK`로 답한다.
+3. 클라이언트가 `ACK`를 보낸다.
+
+SYN과 SYN+ACK는 연결 설정값도 함께 실어 나른다. TCP 헤더 뒤의 옵션(option) 칸에 적어 서로 알리는 방식이다. 이 시리즈에서 다시 만날 옵션은 셋이다.
+
+| 옵션 | 뜻 | 자세한 내용 |
+|---|---|---|
+| MSS(Maximum Segment Size) | 세그먼트 하나에 담을 수 있는 데이터의 최대 크기 | [MTU·MSS 글](/posts/cs/network/mtu-mss-pmtud) |
+| 윈도우 스케일(window scale) | 수신 윈도우 값을 몇 배로 해석할지 정하는 배율 | [흐름 제어 글](/posts/cs/network/tcp-flow-control-nagle-delayed-ack) |
+| SACK 허용(SACK-permitted) | 받은 구간을 골라 알리는 SACK을 쓸 수 있다는 표시 | [신뢰성 글](/posts/cs/network/tcp-reliability-retransmission) |
+
+이 옵션들은 handshake 때만 협상할 수 있다. 7절에서 이 점이 다시 중요해진다.
+
+여기서 중요한 점은 **handshake를 처리하는 주체는 애플리케이션이 아니라 커널**이라는 것이다. 서버 앱은 `accept()`를 호출해야 비로소 완성된 연결을 받는다. 앱이 `accept()`를 호출하기 전에도 SYN은 계속 도착하고, handshake는 커널이 알아서 끝낸다.
+
+그러면 커널은 두 종류의 연결을 들고 있어야 한다.
+
+- 아직 클라이언트의 마지막 ACK를 받지 못한 연결
+- handshake는 끝났지만 앱이 아직 `accept()`로 가져가지 않은 연결
+
+연결 하나마다 커널 메모리가 든다. 그래서 둘 다 길이가 제한된 큐에 담는다. 이 유한함이 뒤에서 볼 두 가지 문제, 즉 SYN flood 공격과 "앱이 잠깐 느려졌을 뿐인데 연결이 실패하는" 현상의 공통 뿌리다.
+
+---
+
+## 2. 큐 두 개를 한 장으로 보기
+
+핵심 아이디어는 한 문장이다. **리스닝 소켓(listening socket)마다 큐가 두 개 있고, 연결은 SYN queue를 거쳐 accept queue에 쌓였다가 앱이 `accept()`로 꺼내야 비워진다.**
+
+용어를 먼저 정리한다.
+
+- **SYN queue**: SYN을 받고 SYN+ACK를 보낸 뒤 ACK를 기다리는 반쯤 열린(half-open) 연결의 큐. 이 연결의 상태는 `SYN_RECV`다.
+- **accept queue**: handshake가 끝나 `ESTABLISHED`가 되었지만 앱이 아직 가져가지 않은 연결의 큐.
+
+```
+ Client                   Server kernel                         Server app
+   |                                                                |
+   |---- (1) SYN ---------> +-----------------+                     |
+   |                        |   SYN queue     |                     |
+   |<--- (2) SYN+ACK ------ |  state SYN_RECV |                     |
+   |                        |  (retry timer)  |                     |
+   |---- (3) ACK ---------> +--------+--------+                     |
+   | connect() returns               |  move                        |
+   |                        +--------v--------+                     |
+   |                        |  accept queue   |                     |
+   |                        |  ESTABLISHED    | <---- accept() ---- |
+   |                        +-----------------+   takes one out     |
+   |                                                                |
+   |      accept queue full -> drop new SYN and the final ACK       |
+```
+
+두 큐는 담는 연결의 성격이 다르다. SYN queue는 "클라이언트가 실제로 존재하는지 아직 모르는" 연결을 가볍게 들고 있는 곳이다. accept queue는 "검증된 연결인데 앱이 아직 처리하지 못한" 연결이 있는 곳이다.
+
+나눠 두면 두 가지가 좋아진다. 첫째, 가짜 SYN이 몰려도 이미 검증된 연결의 자리를 직접 밀어내지 못한다. 둘째, 문제가 어느 쪽인지 지표가 갈린다. 앱이 느리면 accept queue가 차고, 네트워크가 느리거나 공격이면 `SYN_RECV`가 늘어난다.
+
+---
+
+## 3. 단계별 동작: 숫자로 따라가기
+
+서버가 `listen(fd, 128)`을 호출하고, 앱이 GC pause로 2초 동안 `accept()`를 못 한다고 하자. 큐 한도는 128로 가정한다.
+
+| 시각 | 사건 | 큐 상태 |
+|---|---|---|
+| 0.00s | 클라이언트 A가 SYN 전송 | SYN queue에 A 추가 (SYN+ACK 응답) |
+| 0.01s | A의 ACK 도착 | A가 accept queue로 이동, 클라이언트의 `connect()`는 성공 |
+| 0.01~2.0s | 앱이 멈춰 있음, 연결이 계속 도착 | accept queue가 한도까지 참 |
+| 1.50s | 클라이언트 B가 SYN 전송 | accept queue가 가득 차 SYN이 drop됨 |
+| 2.50s | B가 SYN을 재전송 (1초 뒤) | 앱이 `accept()`를 재개해 자리가 났으면 통과 |
+
+세 가지를 짚는다.
+
+- 클라이언트 쪽은 마지막 ACK를 **보낸 순간** `connect()`가 성공한다. 서버 커널이 그 연결을 어느 큐에 두었는지는 클라이언트가 모른다.
+- 서버가 SYN을 drop하면 클라이언트는 응답이 없으니 타이머가 돌 때까지 기다리다가 SYN을 재전송한다. 이것이 일종의 밀어내기(push-back)로 작동해서, 앱이 회복할 시간을 번다.
+- 재전송 간격은 1초, 2초, 4초로 지수적으로 늘어난다. 누적 시각으로는 1초, 3초, 7초 뒤에 시도하므로, 지연된 요청이 **정확히 1초, 3초, 7초** 뒤에 성공하는 패턴으로 보인다.
+
+### SYN+ACK도 재전송된다
+
+서버 쪽도 비슷하다. SYN queue에 있는 연결은 클라이언트의 ACK가 오지 않으면 SYN+ACK를 다시 보낸다. 최대 횟수는 `net.ipv4.tcp_synack_retries`이고 기본값은 5다. 간격이 1, 2, 4, 8, 16초이므로 마지막 재전송은 31초 뒤에 나가고, 그 뒤 32초를 더 기다려 약 63초 만에 엔트리를 포기한다. 커널 `ip-sysctl` 문서도 기본값 5가 31초와 63초에 해당한다고 설명한다.
+
+ACK를 영영 보내지 않는 클라이언트가 많으면 이 엔트리들이 한 분 넘게 메모리를 차지한다. 이것이 SYN flood의 원리다.
+
+---
+
+## 4. 큐의 크기는 누가 정하는가
+
+accept queue의 최대 길이는 두 값 중 **작은 쪽**이다.
+
+- 앱이 `listen(fd, backlog)`에 넘긴 backlog
+- 커널 설정 `net.core.somaxconn`
+
+listen(2) 맨페이지는 backlog가 `somaxconn`보다 크면 **에러 없이 조용히 잘린다**고 설명한다. 기본값은 Linux 5.4부터 4096이고, 그 전 커널은 128이었다.
+
+| 앱이 넘긴 backlog | somaxconn | 실제 한도 |
+|---|---|---|
+| 511 | 4096 | 511 |
+| 1024 | 128 | 128 |
+| 50 | 4096 | 50 |
+
+두 번째 줄이 흔한 함정이다. 앱에서 backlog를 1024로 올려도 `somaxconn`이 128이면 128에서 멈춘다. 반대로 세 번째 줄처럼 앱이 작은 값을 쓰면 `somaxconn`만 올려서는 소용이 없다. backlog를 직접 지정하는 서버라면 앱 설정과 커널 설정을 **둘 다** 봐야 한다.
+
+SYN queue는 어떤가. Cloudflare의 분석에 따르면 예전에는 `net.ipv4.tcp_max_syn_backlog`가 SYN queue의 길이를 제한했지만, 요즘 커널은 backlog와 `somaxconn`이 두 큐의 길이를 함께 제한한다. 그런데 listen(2) 맨페이지는 여전히 `tcp_max_syn_backlog`를 미완성 연결 큐의 한도로 설명한다. 문서마다 설명이 다르고 커널 버전에 따라 동작도 바뀌었으니, 실제 서버의 커널에서 확인하는 편이 안전하다.
+
+---
+
+## 5. ss -lnt로 큐 읽기
+
+`ss`의 Recv-Q와 Send-Q는 소켓 상태에 따라 뜻이 다르다. ESTABLISHED 소켓에서는 읽지 않은 데이터와 아직 확인받지 못한 데이터의 바이트 수이지만, **LISTEN 소켓에서는 큐 정보**다.
+
+- `Recv-Q`: 현재 accept queue에 있는 연결 수 (`accept()`를 기다리는 연결)
+- `Send-Q`: accept queue의 최대 길이 (적용된 backlog)
+
+```
+$ ss -lnt
+State   Recv-Q  Send-Q   Local Address:Port
+LISTEN  0       1024     0.0.0.0:8080
+```
+
+이 출력은 큐가 비어 있고 한도가 1024라는 뜻이다. 앱이 연결을 제때 꺼내고 있다.
+
+```
+$ ss -lnt
+State   Recv-Q  Send-Q   Local Address:Port
+LISTEN  1025    1024     0.0.0.0:8080
+```
+
+Recv-Q가 Send-Q에 붙었다. 앱이 `accept()`를 못 하고 있다는 신호다. Cloudflare는 큐가 `backlog`+1에서 가득 찬 것으로 본다고 설명하므로 1025처럼 한도보다 1 큰 값이 보일 수 있다.
+
+SYN queue 쪽은 `ss`의 LISTEN 줄로는 안 보인다. `ss -nt state syn-recv`로 `SYN_RECV` 소켓을 세는 식으로 본다. Cloudflare의 글은 한 서버에서 `SYN_RECV`가 포트 80에 119개, 443에 78개 있었다는 예를 든다. half-open 연결은 평소에도 있는 것이 정상이다.
+
+### 넘친 흔적은 카운터에 남는다
+
+한 번이라도 넘치면 커널 통계의 `TcpExtListenOverflows`와 `TcpExtListenDrops`가 오른다.
+
+```
+$ nstat -az TcpExtListenOverflows TcpExtListenDrops
+```
+
+주의할 점이 있다. `ListenDrops`는 **호스트 전체 카운터**다. 어느 포트의 어느 앱이 원인인지는 알려 주지 않는다. Cloudflare의 글에는 앱이 정상으로 보이는데도 이 값이 49199까지 올라가 있던 예가 있다. 그래서 카운터가 늘고 있는지를 주기적으로 찍어 증가분을 보고, `ss -lnt`로 어느 소켓의 Recv-Q가 한도에 붙는지 함께 확인해야 한다.
+
+---
+
+## 6. accept queue가 가득 차면: 클라이언트 입장에서
+
+앞서 본 대로 SYN이 drop되면 클라이언트는 재전송을 기다린다. 그런데 더 헷갈리는 경우가 있다.
+
+서버가 SYN+ACK를 이미 보낸 연결에서, 클라이언트가 마지막 ACK를 보냈는데 그 시점에 accept queue가 가득 차 있는 경우다.
+
+- 클라이언트는 ACK를 보낸 순간 `ESTABLISHED`가 되어 `connect()`가 성공한다.
+- 서버는 그 ACK를 drop한다. 커널 코드(`tcp_check_req()`)를 보면 이때 연결에 "ACK는 받았음" 표시만 남기고 SYN queue에 그대로 둔다. Cloudflare의 글도 accept queue가 가득 차면 SYN과 마지막 ACK가 모두 버려진다고 설명한다.
+- 클라이언트가 데이터를 보내도 서버는 아직 연결을 완성하지 않은 상태라 받아주지 않고, 클라이언트는 재전송한다. 서버도 SYN+ACK를 재전송하며 큐에 자리가 나길 기다린다.
+
+이 비대칭 때문에 "연결은 됐는데 응답이 없다"는 증상이 생긴다. 그리고 앱이 뒤늦게 `accept()`로 이 연결을 꺼내면, 클라이언트는 이미 타임아웃을 냈을 수도 있다. 오래 기다린 연결을 뒤늦게 처리하는 셈이다.
+
+### 즉시 실패시키는 옵션도 있다
+
+`net.ipv4.tcp_abort_on_overflow`를 켜면 넘칠 때 연결을 RST로 끊어 클라이언트가 바로 실패를 알게 된다. tcp(7) 맨페이지는 데몬을 더 빠르게 만들 방법이 정말 없을 때만 쓰라고 안내한다. 일시적인 정체에도 연결 실패가 사용자에게 그대로 드러나기 때문이다. Cloudflare도 기본값을 두라고 권한다.
+
+---
+
+## 7. SYN flood와 SYN cookies
+
+SYN flood는 ACK를 절대 보내지 않는 SYN을 대량으로 보내 SYN queue를 채우는 공격이다. 큐가 차면 정상 클라이언트의 SYN도 받아줄 곳이 없다.
+
+핵심 아이디어는 한 문장이다. **SYN queue에 엔트리를 만들지 않고, 연결 정보를 SYN+ACK의 초기 시퀀스 번호(ISN) 안에 암호화해 담아 보낸다.**
+
+ISN(Initial Sequence Number)은 연결마다 고르는 첫 시퀀스 번호다. 정상 클라이언트는 마지막 ACK에서 `ISN+1`을 확인 번호로 돌려준다. 서버는 이 값을 검증해서 연결을 복원한다. 서버가 저장한 상태는 하나도 없다.
+
+이 SYN cookie 방식에는 대가가 있다. ISN은 32비트뿐이라 담을 수 있는 정보가 적다. Linux 구현(`net/ipv4/syncookies.c`)은 32비트를 이렇게 쓴다.
+
+| 구성 | 위치 | 용도 |
+|---|---|---|
+| 시간 카운터 | 상위 8비트 | 1분마다 1씩 오른다. 너무 오래된 쿠키를 거른다 |
+| 해시 + MSS 인덱스 | 하위 24비트 | 주소, 포트, 비밀 키, 시간으로 만든 해시에 MSS 인덱스를 더한 값 |
+
+실제로는 여기에 주소·포트 해시와 클라이언트의 ISN을 한 번 더 더해 겉으로는 무작위 숫자처럼 보이게 한다. MSS는 정확한 값 대신 4개 후보(536, 1300, 1440, 1460) 중 하나의 번호만 담는다.
+
+윈도우 스케일, SACK 같은 나머지 옵션은 담을 자리가 없다. TCP 타임스탬프가 켜져 있으면 그 필드를 활용해 일부를 보존할 수 있다. Cloudflare는 `TCP_SAVED_SYN`, `TCP_DEFER_ACCEPT`, `TCP_FASTOPEN` 같은 기능도 쿠키 모드에서는 동작하지 않는다고 정리했다.
+
+그래서 Linux는 `tcp_syncookies=1`이 기본이다(`ip-sysctl` 문서). tcp(7) 맨페이지에 따르면 1은 **SYN queue가 넘칠 때만** 쿠키를 보내고, 2는 항상 보낸다. 평소에는 옵션을 온전히 협상하는 일반 방식을 쓰고, 공격 상황에서만 쿠키로 넘어가는 절충이다.
+
+---
+
+## 8. 트레이드오프 정리
+
+| 방식 | 얻는 것 | 잃는 것 |
+|---|---|---|
+| 일반 SYN queue | MSS, 윈도우 스케일, SACK 등 옵션을 온전히 협상 | half-open 엔트리가 메모리를 점유한다. 커널 4.14 기준 엔트리당 약 256B. 가득 차면 새 연결 거부 |
+| SYN cookies | 공격 중에도 정상 클라이언트가 연결 가능. 엔트리 메모리 없음 | MSS가 거칠어지고 옵션이 사라진다. 일부 소켓 기능 비활성 |
+| backlog 확대 | 짧은 앱 정지나 연결 폭주(burst)를 흡수 | 메모리 낭비. 앱 정지를 가려서 오래 기다린 연결이 쌓임 |
+| `tcp_abort_on_overflow` | 넘침을 클라이언트에 바로 RST로 알림 | 일시적 정체에도 연결 실패가 노출됨 |
+
+### 증상에서 원인까지 정리
+
+서버 CPU는 한가한데 클라이언트에서 정확히 1초, 3초 지연이 간헐적으로 보인다면 이 순서로 확인한다.
+
+1. `ss -lnt`에서 해당 포트의 Recv-Q가 Send-Q에 붙어 있는지 본다.
+2. `nstat`으로 `ListenOverflows`, `ListenDrops`가 늘어나는지 본다.
+3. `tcpdump`로 같은 4-tuple(출발지/목적지 IP와 포트)의 SYN 재전송이 보이는지 확인한다.
+4. 원인인 `accept()` 지연(GC, 스레드 풀 고갈 등)을 해결하고, 필요하면 backlog와 `somaxconn`을 **둘 다** 올린다.
+
+backlog를 키우는 것은 근본 해결이 아니다. 앱이 연결을 꺼내는 속도가 도착 속도보다 느리면 큐는 결국 찬다.
+
+---
+
+## 결론
+
+- TCP 서버의 리스닝 소켓은 큐가 두 개다. handshake 중인 연결은 SYN queue, 끝났지만 앱이 가져가지 않은 연결은 accept queue에 있다.
+- accept queue의 한도는 `listen`의 backlog와 `somaxconn` 중 작은 값이다. 하나만 올리면 효과가 없을 수 있다.
+- LISTEN 소켓에서 `ss -lnt`의 Recv-Q는 현재 accept queue 깊이, Send-Q는 한도다. Recv-Q가 Send-Q에 붙으면 앱이 `accept()`를 못 하고 있다.
+- 큐가 넘치면 SYN이 drop되고 클라이언트는 1, 3, 7초 간격의 재전송을 기다린다. 앱은 멀쩡해 보이는데 지연이 생기는 이유다.
+- SYN cookies는 상태 없이 SYN flood를 버티게 해 주지만 옵션 정보를 잃기 때문에, 큐가 넘칠 때만 켜지는 기본값을 쓴다.
+
+---
+
+## 출처
+
+- [Cloudflare Blog - SYN packet handling in the wild](https://blog.cloudflare.com/syn-packet-handling-in-the-wild/)
+- [listen(2) - Linux manual page](https://man7.org/linux/man-pages/man2/listen.2.html)
+- [tcp(7) - Linux manual page](https://man7.org/linux/man-pages/man7/tcp.7.html)
+- [Linux kernel documentation - IP Sysctl](https://docs.kernel.org/networking/ip-sysctl.html) (`tcp_synack_retries`, `tcp_syncookies`)
+- [Linux kernel source - net/ipv4/syncookies.c](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/net/ipv4/syncookies.c) (쿠키 비트 배치, MSS 후보값)
+- [Linux kernel source - net/ipv4/tcp_minisocks.c](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/net/ipv4/tcp_minisocks.c) (`tcp_check_req()`의 accept queue 넘침 처리)

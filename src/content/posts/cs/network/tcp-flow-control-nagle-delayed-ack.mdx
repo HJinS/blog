@@ -1,0 +1,225 @@
+---
+author: 허진수
+pubDatetime: 2026-11-04T05:33:00.000Z
+title: TCP 흐름 제어, Nagle, Delayed ACK
+featured: false
+draft: false
+tags:
+  - network
+  - tcp
+  - latency
+description: 수신 윈도우로 송신 속도를 맞추는 흐름 제어와, Nagle 알고리즘과 Delayed ACK가 만나 40ms 지연을 만드는 과정을 이해한다.
+---
+
+## 개요
+
+TCP는 데이터를 잃지 않고 순서대로 전달한다. 그런데 "받는 쪽이 감당할 수 있는 속도"는 어떻게 맞출까? 그리고 CPU, 메모리, GC가 모두 정상인데 요청이 늘 40ms씩 느린 현상은 왜 생길까?
+
+이 글이 답하는 질문은 두 가지다.
+
+- 수신자는 송신자의 속도를 어떻게 늦추고, 완전히 멈추게 하는가?
+- Nagle 알고리즘과 Delayed ACK는 각각 합리적인데, 왜 둘이 만나면 40ms가 사라지는가?
+
+TCP의 신뢰성(재전송 등)은 [앞 글](/posts/cs/network/tcp-reliability-retransmission)에서 다뤘다. 네트워크 쪽 보호 장치인 혼잡 제어는 [다음 글](/posts/cs/network/tcp-congestion-control)에서 다룬다.
+
+---
+
+## 1. 왜 흐름 제어가 필요한가
+
+수신 서버가 커널 수신 버퍼에 데이터를 쌓아 두고, 애플리케이션이 `read()`로 꺼내 간다. 버퍼 크기가 64KB라고 하자. 송신자가 1초에 10MB를 보내는데 애플리케이션이 1초에 1MB만 읽으면 버퍼는 금방 찬다.
+
+버퍼가 가득 찬 뒤에 도착한 데이터는 버릴 수밖에 없다. 버리면 재전송이 일어나고, 그 재전송이 다시 대역폭을 낭비한다.
+
+**핵심 아이디어: 수신자가 "지금 얼마나 더 받을 수 있는지"를 송신자에게 알려 주고, 송신자는 그 한도 안에서만 보낸다.** 이것이 흐름 제어(flow control)다.
+
+흐름 제어와 혼잡 제어는 보호하는 대상이 다르다.
+
+| 구분 | 흐름 제어 | 혼잡 제어 |
+|------|-----------|-----------|
+| 보호 대상 | 수신자의 버퍼(종단) | 네트워크 경로 |
+| 윈도우 | 수신 윈도우(rwnd) | 혼잡 윈도우(cwnd) |
+| 값을 정하는 쪽 | 수신자가 ACK에 실어 알림 | 송신자가 손실과 RTT로 추정 |
+
+실제로 보낼 수 있는 양은 두 윈도우 중 작은 쪽으로 제한된다. cwnd는 [다음 글](/posts/cs/network/tcp-congestion-control)에서 자세히 본다.
+
+---
+
+## 2. 슬라이딩 윈도우: 숫자로 따라가기
+
+수신 윈도우(receive window, rwnd)는 수신자가 ACK의 윈도우 필드에 적어 보내는 값이다. "ACK한 지점 뒤로 이만큼은 더 받을 수 있다"는 뜻이다.
+
+송신자는 바이트 스트림을 네 구간으로 나눠 관리한다. 바이트 번호는 1부터 센 오프셋이고, 수신자가 알려 준 윈도우가 8바이트라고 하자.
+
+```
+byte:  1  2  3  4 | 5  6  7  8 | 9 10 11 12 | 13 14 ...
+       (A) acked  | (B) sent,  | (C) usable | (D) outside
+                  |  not acked |  not sent  |  window
+                  ^            ^
+              SND.UNA       SND.NXT
+                  |<--- window = 8 bytes -->|
+```
+
+| 구간 | 바이트 | 뜻 |
+|---|---|---|
+| A | 1~4 | 보냈고 ACK도 받았다. 송신 버퍼에서 지워도 된다 |
+| B | 5~8 | 보냈지만 아직 ACK를 못 받았다 |
+| C | 9~12 | 아직 안 보냈지만 윈도우 안이라 지금 보낼 수 있다 |
+| D | 13~ | 윈도우 밖이라 ACK가 와서 윈도우가 밀려야 보낼 수 있다 |
+
+두 경계에는 RFC가 붙인 이름이 있다. SND.UNA(send unacknowledged)는 아직 확인받지 못한 첫 바이트, SND.NXT(send next)는 다음에 보낼 바이트다. 윈도우는 SND.UNA에서 시작한다.
+
+보낼 수 있는 양은 다음 식으로 계산한다.
+
+```
+전송 가능량 = min(rwnd, cwnd) - 미확인 바이트
+```
+
+예를 들어 rwnd가 8, cwnd가 10이고 5~8번(4바이트)이 아직 ACK되지 않았다면, 전송 가능량은 `min(8, 10) - 4 = 4`바이트다. 그림의 C 구간, 9~12번이다.
+
+5~6번에 대한 ACK가 도착하면 SND.UNA가 7로 이동하고, 윈도우도 7~14번으로 따라서 미끄러진다. 13, 14번이 새로 보낼 수 있는 구간에 들어온다. 이름이 슬라이딩 윈도우(sliding window)인 이유다.
+
+윈도우가 넓을수록 ACK를 기다리지 않고 한꺼번에 많이 보낼 수 있다. 처리량은 대략 `윈도우 / RTT`로 정해진다. RTT가 100ms인데 윈도우가 64KB면 최대 약 5Mbps에 그친다.
+
+---
+
+## 3. rwnd = 0: 멈춤과 persist timer
+
+애플리케이션이 소켓을 읽지 못하면 수신 버퍼가 찬다. 수신자는 ACK에 `rwnd=0`을 실어 보낸다. 이것이 제로 윈도우(zero window)다. 송신자는 전송을 멈춘다.
+
+문제는 그 다음이다. 버퍼가 비어서 수신자가 "이제 받을 수 있다"는 윈도우 업데이트 ACK를 보냈는데, 그 ACK가 유실되면 어떻게 될까? 송신자는 계속 0으로 알고 기다리고, 수신자는 송신자가 곧 보내리라 믿는다. 영원히 멈춘다.
+
+이를 막는 것이 제로 윈도우 프로브(zero-window probe)다. 송신자는 윈도우가 0인 동안 작은 세그먼트(보통 1바이트)를 주기적으로 보내 "아직 닫혀 있는지" 묻는다. 수신자는 윈도우가 0이어도 이 세그먼트에 현재 윈도우를 담은 ACK로 답해야 한다. 그 ACK에 열린 윈도우가 담겨 오면 송신자는 전송을 재개한다.
+
+프로브를 보낼 때를 재는 타이머를 persist timer라고 부른다. RFC 9293은 프로브를 반드시 지원하라고(MUST) 정하고, 첫 프로브는 RTO만큼 지난 뒤 보내며 간격을 지수적으로 늘리라고 권고한다(SHOULD).
+
+이 현상은 운영에서 이렇게 보인다.
+
+- 연결은 살아 있고 `ss -tin`에서 수신 쪽 `Recv-Q`가 계속 쌓여 있다.
+- 네트워크에는 프로브 외에 데이터가 거의 안 흐른다.
+- 원인은 네트워크가 아니라 소켓을 읽지 못하는 소비자다(스레드 블록, 이벤트 루프 정체).
+
+그래서 이런 증상에서는 네트워크 장비보다 수신 애플리케이션을 먼저 본다.
+
+---
+
+## 4. 64KB의 벽과 window scale
+
+TCP 헤더의 윈도우 필드는 16비트다. 표현할 수 있는 최댓값은 65,535바이트로 약 64KB다. RTT가 100ms인 구간에서 64KB 윈도우로는 최대 5Mbps 정도밖에 못 낸다. 대역폭이 넓고 지연이 긴 링크에서는 치명적이다.
+
+해결책이 window scale 옵션이다. 연결을 맺을 때 양쪽이 "윈도우 필드 값을 2의 n제곱 배 해서 해석하자"고 합의한다. RFC 7323에 따르면 n은 최대 14여서 윈도우를 최대 1GiB까지 키울 수 있다.
+
+이 합의는 SYN 단계에서만 가능하다. 연결 중간에 켤 수 없으므로, 중간 장비가 이 옵션을 지우면 64KB에 묶인다.
+
+---
+
+## 5. Nagle 알고리즘과 Delayed ACK: 각자는 합리적이다
+
+두 기법 모두 작은 패킷이 너무 많은 것을 막으려고 생겼다.
+
+### Nagle: 송신 쪽의 작은 패킷 억제
+
+텔넷처럼 키 입력 1바이트마다 `write()`를 하면 어떻게 될까? 1바이트를 보내려고 헤더 40바이트(IP 20 + TCP 20)가 붙는다. RFC 896은 이를 작은 패킷 문제(small-packet problem)라 부르고, 이때 41바이트 패킷이 오간다고 설명한다.
+
+Nagle의 규칙은 한 문장이다. **"아직 ACK 받지 못한 데이터가 있으면, MSS(한 세그먼트에 담을 수 있는 최대 데이터)보다 작은 새 데이터는 보내지 않고 모은다."** ACK가 오거나 MSS만큼 쌓이면 그때 보낸다.
+
+### Delayed ACK: 수신 쪽의 빈 ACK 억제
+
+데이터를 받을 때마다 ACK만 담은 패킷을 보내면 낭비다. 응답 데이터가 곧 나갈 테니 거기에 ACK를 얹어 보내면(piggyback) 패킷 하나가 줄어든다.
+
+RFC 1122는 이렇게 정한다.
+
+- 수신자는 ACK를 지연시킬 수 있지만 0.5초 미만이어야 한다.
+- 풀 사이즈 세그먼트 두 개마다는 적어도 한 번 ACK해야 한다.
+
+Linux 커널 코드는 ACK를 미루는 시간의 하한을 `TCP_DELACK_MIN`(HZ/25, 40ms), 상한을 `TCP_DELACK_MAX`(HZ/5, 200ms)로 정의한다. 실제 지연은 이 범위 안에서 연결 상태에 따라 정해진다.
+
+---
+
+## 6. 둘이 만나면: 40ms 타임라인
+
+애플리케이션이 요청을 두 번의 `write()`로 나눠 쓰고(헤더 100B, 본문 20B) 응답을 기다리는 write-write-read 패턴을 보자.
+
+```
+  Client                                   Server
+    |                                        |
+ t=0  write #1 (header 100B) --------------> |
+    |  (sent now: nothing unACKed yet)       |
+    |                                        | server: waiting for
+    |  write #2 (body 20B)                   | more data, so it
+    |  Nagle: unACKed data exists, HOLD      | DELAYS the ACK
+    |                                        |
+    |  ......... both sides wait ........... |
+    |                                        |
+ t=40ms                                      | delayed-ACK timer fires
+    | <------------------------------ ACK    |
+    |  ACK arrived, send held body           |
+    |  write #2 (body 20B) ----------------> |
+    |                                        | request complete,
+    | <-------------------------- response   | now it can respond
+```
+
+한 단계씩 보면 이렇다.
+
+1. 첫 쓰기(헤더)는 미확인 데이터가 없으므로 즉시 나간다.
+2. 두 번째 쓰기(본문)는 작은 데이터이고 첫 패킷이 아직 ACK되지 않았다. Nagle이 붙잡는다.
+3. 서버는 요청이 완성되지 않아 응답할 수 없다. 응답에 ACK를 얹을 기회가 없으니 ACK를 지연시킨다.
+4. 클라이언트는 ACK를 기다리고, 서버는 나머지 데이터를 기다린다. 서로 상대를 기다리는 교착 상태다.
+5. delayed ACK 타이머가 만료되면 ACK가 오고, 그제야 본문이 나간다. 위 그림은 Linux의 하한인 40ms를 기준으로 그렸다. 서버 쪽 스택과 상태에 따라 200ms 근처까지 늘어날 수 있다.
+
+어느 쪽도 버그가 아니다. 각 규칙은 따로 보면 맞고, 조합이 문제다. 그래서 CPU나 GC가 한가한데도 응답 시간 분포에서 40ms 또는 200ms 근처에 뾰족한 봉우리가 생긴다.
+
+---
+
+## 7. 해결과 트레이드오프
+
+실제 사례가 있다. Julia Evans는 로컬 NSQ 데몬에 HTTP로 메시지를 발행할 때 요청마다 약 40ms가 걸렸고, 데몬의 CPU와 메모리, GC는 모두 정상이었다고 쓴다. 예전에 읽은 GoCardless의 글(Ruby HTTP 클라이언트가 헤더와 본문을 두 패킷으로 나눠 보내 POST마다 약 200ms가 늘어난 사례)을 떠올려 애플리케이션에서 `TCP_NODELAY`를 켜자 40ms가 즉시 사라졌다. 다만 이 글은 패킷 캡처로 교착을 직접 증명하지는 않았고, 지연이 사라졌다는 결과가 근거다.
+
+해결책은 선택지가 여러 개다.
+
+| 설정 | 동작 | 유리한 경우 | 위험 |
+|------|------|-------------|------|
+| Nagle ON (기본) | 작은 데이터를 모아 전송 | 1바이트씩 쓰는 대량 소패킷, 헤더 오버헤드 절감 | write-write-read에서 수십~수백 ms 지연 |
+| `TCP_NODELAY` | 쓰기 즉시 전송 | RPC, 게임, 트레이딩 같은 지연 민감 요청-응답 | 아주 작은 쓰기를 남발하면 패킷 수와 CPU 증가 |
+| 한 번에 쓰기(`writev`, 앱 버퍼링) | 헤더와 본문을 합쳐 한 번에 전송 | 대부분의 요청-응답 | 코드 수정 필요 |
+| `TCP_CORK` | 쓰기를 모았다가 풀 때 전송 | HTTP 헤더 + 파일(`sendfile`) | 풀지 않으면 최대 200ms까지 지연(tcp(7)), 이식성 없음 |
+| `TCP_QUICKACK` | 수신 측 ACK 지연 해제 | 수신자 쪽에서만 해결 가능할 때 | 플래그가 일회성으로 풀릴 수 있고 ACK 트래픽 증가 |
+
+가장 근본적인 해결은 애초에 쓰기를 두 번 하지 않는 것이다. 헤더와 본문을 합쳐 한 번에 쓰면 Nagle이 붙잡을 작은 두 번째 쓰기가 없다.
+
+의심되는 상황에서 확인하는 순서는 다음과 같다.
+
+1. `strace`로 같은 요청에서 `write`가 여러 번 호출되는지 본다.
+2. `tcpdump`나 Wireshark로 작은 세그먼트 뒤 약 40ms 간격으로 ACK가 오는지 본다.
+3. 송신 쪽에서 `TCP_NODELAY`를 켜거나 쓰기를 합쳐 지연이 사라지는지 확인한다.
+
+`TCP_NODELAY`를 켰는데도 지연이 남는다면 다른 후보를 본다. 프록시나 로드밸런서 구간의 Nagle 설정, TLS 레코드 분할, 앱 레벨 버퍼링, 혼잡 윈도우 초기값에 의한 slow start가 그것이다. 구간별로 캡처해서 나눠 본다.
+
+---
+
+## 결론
+
+- 흐름 제어는 수신자 버퍼를 보호한다. 수신자가 ACK에 rwnd를 실어 보내고, 송신자는 `min(rwnd, cwnd)` 한도 안에서만 보낸다.
+- rwnd가 0이 되면 송신자는 멈추고 persist timer로 1바이트 프로브를 보내 윈도우가 열렸는지 확인한다. 이때 먼저 의심할 곳은 네트워크가 아니라 소켓을 읽지 못하는 수신 애플리케이션이다.
+- Nagle(송신 쪽 모으기)과 Delayed ACK(수신 쪽 미루기)는 각각 합리적이지만, write-write-read에서는 서로를 기다려 약 40ms를 잃는다.
+- 해결은 쓰기를 합치거나 `TCP_NODELAY`를 켜는 것이다.
+
+두 윈도우를 비교하면 다음과 같다. cwnd는 다음 글에서 이어진다.
+
+| 항목 | rwnd | cwnd |
+|------|------|------|
+| 누구를 보호하나 | 수신자 버퍼 | 네트워크 경로 |
+| 누가 정하나 | 수신자(ACK로 통지) | 송신자(손실, RTT로 추정) |
+| 막혔을 때 증상 | `Recv-Q` 증가, zero window | 손실 뒤 처리량 급감, slow start |
+| 다음 글 | 이 글 | [TCP 혼잡 제어](/posts/cs/network/tcp-congestion-control) |
+
+---
+
+## 출처
+
+- [Julia Evans, Why you should understand (a little) about TCP](https://jvns.ca/blog/2015/11/21/why-you-should-understand-a-little-about-tcp/)
+- [RFC 896, Congestion Control in IP/TCP Internetworks (Nagle)](https://www.rfc-editor.org/rfc/rfc896)
+- [RFC 1122, Requirements for Internet Hosts - Communication Layers](https://www.rfc-editor.org/rfc/rfc1122)
+- [RFC 7323, TCP Extensions for High Performance (window scale)](https://www.rfc-editor.org/rfc/rfc7323)
+- [RFC 9293, Transmission Control Protocol (3.8.6.1 Zero-Window Probing)](https://www.rfc-editor.org/rfc/rfc9293)
+- [tcp(7) - Linux manual page (`TCP_NODELAY`, `TCP_CORK`, `TCP_QUICKACK`)](https://man7.org/linux/man-pages/man7/tcp.7.html)
+- [Linux kernel source - include/net/tcp.h (`TCP_DELACK_MIN`, `TCP_DELACK_MAX`)](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/net/tcp.h)

@@ -1,0 +1,504 @@
+---
+author: 허진수
+pubDatetime: 2026-11-04T05:51:00.000Z
+title: "I/O 멀티플렉싱: select/poll/epoll, 그리고 io_uring"
+featured: false
+draft: false
+tags:
+  - os
+  - linux
+  - network
+  - concurrency
+description: 스레드 하나가 수만 개의 연결을 다루는 원리를 select/poll의 한계에서 epoll의 관심 목록·준비 목록, LT/ET 차이, io_uring의 SQ/CQ 링까지 따라가며 이해한다.
+---
+
+## 개요
+
+[앞 글](/posts/cs/os/interrupt-dma-napi)에서는 네트워크 카드에 도착한 패킷이 인터럽트와 DMA를 거쳐 커널의 소켓 버퍼까지 올라오는 과정을 봤다. 이번 글은 그다음 단계를 다룬다. 소켓 버퍼에 데이터가 쌓였다는 사실을 애플리케이션이 어떻게 알아채는가?
+
+이 글이 답하는 질문은 두 가지다.
+
+- 스레드 하나가 어떻게 연결 수만 개를 동시에 처리하는가? select, poll, epoll은 무엇이 다른가?
+- epoll이 있는데 io_uring은 왜 또 나왔는가?
+
+연결마다 스레드를 하나씩 두면 왜 버티지 못하는지(C10K 문제)는 [프로세스 vs 스레드 글](/posts/cs/os/process-vs-thread-context-switching)에서 메모리와 컨텍스트 스위칭 비용으로 계산했다. 이 글은 그 결론, 즉 "적은 스레드로 많은 연결을 다룬다"를 OS가 어떻게 가능하게 하는지에 집중한다.
+
+먼저 용어 두 개를 정한다.
+
+- 파일 디스크립터(file descriptor, fd)는 프로세스가 연 파일, 소켓, 파이프를 가리키는 작은 정수다. 소켓 하나가 fd 하나다.
+- 시스템 콜(system call)은 애플리케이션이 커널에 일을 부탁하는 호출이다. `read()`, `write()`, `epoll_wait()`가 모두 시스템 콜이고, 호출할 때마다 사용자 모드와 커널 모드를 오가는 비용이 든다.
+
+---
+
+## 1. I/O 모델 4분면: 블로킹/논블로킹 x 동기/비동기
+
+### 왜 이 구분이 필요한가
+
+"논블로킹"과 "비동기"는 자주 같은 뜻으로 쓰인다. 하지만 epoll과 io_uring의 차이를 이해하려면 둘을 나눠야 한다. 섞어 쓰면 "epoll도 비동기 아닌가?"라는 질문에 답할 수 없다.
+
+### 핵심 아이디어
+
+**축은 두 개다. 블로킹/논블로킹은 "호출이 기다리는가", 동기/비동기는 "데이터 복사를 누가 끝내고 알려주는가"다.**
+
+소켓에서 데이터를 읽는 일은 두 단계로 나뉜다.
+
+1. 데이터가 도착하기를 기다린다. 커널 소켓 버퍼에 데이터가 들어올 때까지다.
+2. 커널 버퍼의 데이터를 애플리케이션 버퍼로 복사한다.
+
+블로킹(blocking)은 호출한 스레드가 결과가 나올 때까지 멈춰 있는 것이다. 논블로킹(non-blocking)은 준비가 안 됐으면 바로 "아직 없음"(`EAGAIN`)을 돌려주는 것이다.
+
+동기(synchronous)는 2단계 복사를 애플리케이션이 직접 `read()`를 불러서 하는 것이다. 비동기(asynchronous)는 커널이 2단계까지 끝낸 뒤 "다 됐다"고 알려주는 것이다.
+
+이 차이를 준비 통지(readiness)와 완료 통지(completion)라고도 부른다. 용어의 경계는 자료마다 조금씩 다르다. 이 글은 위 기준으로 나눈다.
+
+### 4분면 표
+
+|  | 블로킹 (기다리는 동안 멈춤) | 논블로킹 (바로 돌아옴) |
+|---|---|---|
+| **동기** (복사는 내가 `read()`로) | 기본 `read()`. 데이터가 올 때까지 스레드가 잠든다 | `O_NONBLOCK` 소켓에 `read()`를 반복. 없으면 `EAGAIN` |
+| **동기 + 멀티플렉싱** | `select`/`poll`/`epoll_wait`에서 여러 fd를 한꺼번에 기다린다. 깨어난 뒤 `read()`는 바로 끝난다 | 타임아웃 0으로 준비된 fd만 확인하고 돌아온다 |
+| **비동기** (복사는 커널이) | io_uring에 요청을 넣고 `io_uring_enter`로 완료를 기다린다 | io_uring에 요청만 넣고, 나중에 완료 큐를 들여다본다 |
+
+### 단계별로 보기: 데이터가 50ms 뒤에 오는 소켓
+
+같은 상황을 세 방식으로 처리해 보자. 클라이언트가 요청을 50ms 뒤에 보낸다.
+
+```
+time      blocking read()       epoll (readiness)          io_uring (completion)
+-------   -------------------   ------------------------   ------------------------
+0 ms      read() -> sleep       epoll_wait() -> sleep      submit READ sqe, go on
+          (this thread only)    (watching 10,000 fds)      (thread does other work)
+50 ms     data arrives          data arrives               data arrives
+          kernel copies         wake: "fd 7 is readable"   kernel copies to buf
+          read() returns 512    read(fd 7) -> 512          CQE: res = 512
+-------   -------------------   ------------------------   ------------------------
+copy by   kernel, inside call   app calls read() itself    kernel, before notify
+```
+
+블로킹 `read()`는 스레드 하나가 소켓 하나에 묶인다. epoll은 스레드 하나가 수만 fd를 한꺼번에 기다리지만, 깨어난 뒤 `read()`를 직접 불러야 한다. io_uring은 그 `read()`까지 커널이 끝내 놓는다.
+
+비유 하나를 들자. 준비 통지는 음식이 나오면 울리는 진동벨이다. 벨이 울리면 직접 카운터에 가서 받아 온다. 완료 통지는 직원이 음식을 자리까지 가져다주는 것이다. 이 비유가 틀리는 지점도 있다. epoll의 벨은 울렸는데 가 보니 음식이 없는 경우(다른 스레드가 먼저 읽어 간 경우)가 있다. 그래서 준비 통지를 받은 뒤에도 `read()`가 `EAGAIN`을 낼 수 있다고 가정하고 코드를 짠다.
+
+### 그래서 생기는 문제
+
+멀티플렉싱은 "기다림"을 여러 fd에 나눠 주지만 "복사"는 여전히 애플리케이션 몫이다. 준비된 fd가 1,000개면 `read()` 시스템 콜도 1,000번이다. 6절의 io_uring은 바로 이 비용을 겨냥한다.
+
+---
+
+## 2. select와 poll의 한계
+
+### 왜 필요한가
+
+연결 10,000개를 블로킹 `read()`로 처리하려면 스레드가 10,000개 필요하다. 대부분은 데이터를 기다리며 자고 있을 뿐인데, 스택 메모리와 스케줄링 비용은 그대로 든다. 그래서 "여러 fd 중 지금 읽을 수 있는 것이 무엇인지 커널에게 한 번에 묻는" 시스템 콜이 생겼다. 이것이 I/O 멀티플렉싱(I/O multiplexing)이다.
+
+### 핵심 아이디어
+
+**select와 poll은 호출할 때마다 감시할 fd 목록 전체를 커널에 넘기고, 커널은 그 전체를 훑어서 준비된 것을 표시해 돌려준다.**
+
+### select의 동작
+
+1. 애플리케이션이 비트맵 `fd_set`에 감시할 fd 번호를 켠다. fd 7을 보고 싶으면 7번 비트를 1로 둔다.
+2. `select()`를 부르면 비트맵이 커널로 복사된다.
+3. 커널은 켜진 비트를 처음부터 끝까지 훑으며 fd마다 준비 여부를 확인한다. 아무것도 준비되지 않았으면 fd마다 대기 등록을 하고 잠든다.
+4. 깨어나면 준비된 fd의 비트만 남기고 나머지는 지운 뒤 돌려준다.
+5. 애플리케이션은 다시 비트맵 전체를 훑어 어떤 비트가 남았는지 찾는다.
+
+4단계 때문에 비트맵은 호출할 때마다 망가진다. Linux의 `select(2)` 매뉴얼도 루프에서 쓸 때는 매번 다시 채워야 한다고 적고 있다.
+
+더 큰 제약은 크기다. `select()`는 번호가 `FD_SETSIZE`(1024)보다 작은 fd만 감시할 수 있다. 같은 매뉴얼은 현대 애플리케이션이라면 `poll(2)`이나 `epoll(7)`을 쓰라고 권한다.
+
+### poll의 개선과 남은 문제
+
+poll은 비트맵 대신 `struct pollfd` 배열을 받는다. 원소 하나가 fd 번호, 관심 이벤트, 결과 이벤트를 담는다. 배열이라서 1024 상한은 사라졌다.
+
+하지만 구조는 같다. 매 호출마다 배열 전체를 커널로 복사하고, 커널은 전체를 훑는다.
+
+### 숫자로 보기: 10,000개 중 10개만 활성
+
+채팅 서버에 연결이 10,000개 있고, 어느 순간 메시지가 온 연결은 10개라고 하자.
+
+```
+poll() call #1
+  user -> kernel : copy 10,000 pollfd (8 bytes each = 80,000 bytes)
+  kernel         : check 10,000 fds, find 10 ready
+  kernel -> user : copy back 10,000 pollfd
+  user           : scan 10,000 revents, find the 10
+
+poll() call #2  : the same work again, even if only 1 fd changed
+```
+
+일을 하는 연결은 10개인데, 매번 10,000개를 복사하고 훑는다. 비용이 활성 연결 수가 아니라 전체 연결 수 N에 비례한다. 즉 호출당 $O(N)$이다.
+
+### 그래서 생기는 문제
+
+연결이 적거나 거의 모든 연결이 항상 바쁘다면 이 $O(N)$은 문제가 아니다. 어차피 대부분을 처리해야 하기 때문이다. 문제는 "연결은 아주 많고, 한 순간에 활성인 비율은 낮은" 워크로드다. 채팅, 푸시 알림, 롱 폴링 서버가 여기에 해당한다. 이 경우 CPU 대부분을 "준비 안 된 fd 확인"에 쓴다.
+
+---
+
+## 3. epoll의 구조: 관심 목록과 준비 목록
+
+### 왜 필요한가
+
+select와 poll의 낭비는 두 가지다. 같은 목록을 매번 넘기는 것, 그리고 바뀌지 않은 fd까지 매번 훑는 것이다. 감시 목록은 커널이 기억하게 하고, 바뀐 것만 받으면 둘 다 없앨 수 있다.
+
+### 핵심 아이디어
+
+**관심 있는 fd는 커널에 한 번만 등록하고, 이벤트가 생긴 fd를 커널이 준비 목록에 직접 넣어 두면, `epoll_wait`는 그 준비 목록만 가져가면 된다.**
+
+`epoll(7)` 매뉴얼은 epoll 인스턴스를 두 목록으로 설명한다.
+
+- 관심 목록(interest list): 프로세스가 감시하겠다고 등록한 fd의 집합이다.
+- 준비 목록(ready list): 그중 실제로 I/O가 가능해진 fd다. 커널이 I/O 활동에 따라 채운다.
+
+Linux 커널 소스(`fs/eventpoll.c`)에서 관심 목록은 레드-블랙 트리(red-black tree)로, 준비 목록은 이중 연결 리스트로 구현되어 있다. 레드-블랙 트리는 등록, 검색, 삭제가 모두 $O(\log N)$인 균형 이진 트리다.
+
+### 단계별 동작
+
+```
+ (1) epoll_create1()          (2) epoll_ctl(ADD) x 10,000, once
+         |                            |
+         v                            v
+ +--------------------------------------------------------+
+ |  epoll instance (in kernel)                            |
+ |                                                        |
+ |  interest list (RB-tree)          ready list (linked)  |
+ |  [fd 3] [fd 4] ... [fd 10002]     [fd 7] -> [fd 921]   |
+ |        |                              ^                |
+ |        +--(3) data arrives on fd 7 ---+                |
+ |              callback adds fd 7                        |
+ +--------------------------------------------------------+
+         |
+         v
+ (4) epoll_wait() -> returns only the ready list (2 fds)
+```
+
+1. `epoll_create1()`로 커널 안에 epoll 인스턴스를 만든다. 이것도 fd 하나로 돌려받는다.
+2. `epoll_ctl(EPOLL_CTL_ADD)`로 감시할 fd를 등록한다. 연결마다 한 번이다. 이때 커널은 그 소켓의 대기 큐에 콜백을 걸어 둔다.
+3. 패킷이 도착해 소켓 버퍼에 데이터가 쌓이면, 소켓이 대기자를 깨우면서 그 콜백이 실행된다. 콜백은 해당 fd를 준비 목록 끝에 붙인다.
+4. `epoll_wait()`는 준비 목록에 있는 것만 사용자 공간으로 복사해 돌려준다.
+
+같은 숫자로 다시 보자. 등록된 fd가 10,000개, 활성 fd가 10개다. `epoll_wait()`는 10개만 돌려준다. 애플리케이션도 10개만 훑는다. 호출당 비용이 전체 N이 아니라 준비된 fd 수 k에 비례한다. $O(k)$다.
+
+### 이벤트 루프의 모양
+
+실제 코드는 대략 이렇게 생겼다. 4절에서 다룰 엣지 트리거 모드를 쓴 의사코드다.
+
+```c
+ep = epoll_create1(0);
+set_nonblocking(listen_fd);
+epoll_ctl(ep, EPOLL_CTL_ADD, listen_fd, EPOLLIN);
+
+for (;;) {
+    n = epoll_wait(ep, events, 1024, -1);       // sleep until something is ready
+    for (i = 0; i < n; i++) {
+        if (events[i].fd == listen_fd) {
+            // accept every pending connection
+            while ((c = accept4(listen_fd, NULL, NULL, SOCK_NONBLOCK)) >= 0)
+                epoll_ctl(ep, EPOLL_CTL_ADD, c, EPOLLIN | EPOLLET);
+        } else {
+            // read until EAGAIN
+            while ((r = read(events[i].fd, buf, sizeof buf)) > 0)
+                handle(buf, r);
+            if (r == 0) close(events[i].fd);    // peer closed
+        }
+    }
+}
+```
+
+### 그래서 생기는 문제
+
+epoll이 항상 빠른 것은 아니다.
+
+| 상황 | epoll의 이득 | 이유 |
+|---|---|---|
+| 연결 많고 활성 비율 낮음 (채팅, 푸시) | 크다 | $O(N)$ 대신 $O(k)$ |
+| 연결이 수십 개뿐 | 거의 없다 | N이 작으면 $O(N)$도 싸다 |
+| 거의 모든 연결이 항상 활성 | 거의 없다 | k가 N에 가깝다 |
+| 짧은 연결이 아주 잦음 | 줄어든다 | 연결마다 `epoll_ctl` ADD/DEL 시스템 콜이 붙는다 |
+| 일반 파일 I/O | 없다 | 아래 설명 |
+
+일반 파일은 epoll로 감시할 수 없다. `epoll_ctl(2)` 매뉴얼에 따르면 일반 파일이나 디렉터리를 등록하면 `EPERM`이 난다. select와 poll에서는 POSIX가 일반 파일을 "항상 읽기·쓰기 가능"으로 보고하도록 정해 두었다. 하지만 실제 `read()`는 페이지 캐시에 데이터가 없으면 디스크를 기다리며 블록된다. 준비 통지는 파일 I/O에서 아무 정보도 주지 못한다.
+
+등록 자체에도 비용이 있다. `epoll(7)` 매뉴얼은 등록된 fd 하나가 64비트 커널에서 약 160바이트를 쓴다고 적고 있다. 10,000개면 약 1.6MB다. 사용자당 등록 수 상한은 `/proc/sys/fs/epoll/max_user_watches`로 정하고, 넘으면 `epoll_ctl`이 `ENOSPC`를 낸다.
+
+그리고 epoll은 Linux 전용이다. BSD와 macOS에는 같은 역할의 kqueue가 있다. 그래서 libuv나 Netty 같은 라이브러리는 OS마다 다른 구현을 감싸 둔다.
+
+---
+
+## 4. level-triggered vs edge-triggered
+
+### 왜 필요한가
+
+준비 목록에 fd가 들어간 뒤, 애플리케이션이 데이터를 일부만 읽었다고 하자. 다음 `epoll_wait()`에서 이 fd를 또 알려줘야 할까? 답에 따라 두 가지 모드가 있다.
+
+### 핵심 아이디어
+
+**레벨 트리거(level-triggered, LT)는 "준비된 상태인 동안 매번" 알려주고, 엣지 트리거(edge-triggered, ET)는 "준비 안 됨에서 준비됨으로 바뀌는 순간 한 번만" 알려준다.**
+
+이름은 전기 신호에서 왔다. 레벨은 신호가 높은 상태 자체를, 엣지는 낮음에서 높음으로 바뀌는 경계를 가리킨다. LT가 기본값이고, 등록할 때 `EPOLLET` 플래그를 주면 ET가 된다.
+
+### 단계별로 보기: 2KB 쓰고 1KB 읽기
+
+`epoll(7)` 매뉴얼에 나오는 예시를 따라가 보자. 파이프의 읽기 쪽 fd를 epoll에 등록했다.
+
+| 단계 | 일어난 일 | LT | ET |
+|---|---|---|---|
+| 1 | 쓰는 쪽이 2KB를 쓴다 | 준비됨 | 준비됨 (변화 발생) |
+| 2 | `epoll_wait()` | fd를 돌려줌 | fd를 돌려줌 |
+| 3 | 1KB만 읽는다 | 아직 1KB 남음 | 아직 1KB 남음 |
+| 4 | `epoll_wait()` 다시 | 즉시 fd를 또 돌려줌 | 새 변화가 없으므로 기다림. 새 데이터가 안 오면 영원히 |
+
+LT에서 epoll은 사실상 "더 빠른 poll"이다. 매뉴얼도 LT 모드의 의미가 poll과 같다고 설명한다. 덜 읽어도 다음에 또 알려주니 실수에 너그럽다.
+
+ET에서는 4단계에서 남은 1KB에 대한 통지가 다시 오지 않는다. 그래서 규칙이 생긴다.
+
+1. fd를 반드시 논블로킹으로 둔다. 그렇지 않으면 "끝까지 읽기"의 마지막 `read()`에서 스레드가 블록된다.
+2. 통지를 받으면 `read()`(또는 `write()`, `accept()`)가 `EAGAIN`을 낼 때까지 반복한다. 매뉴얼의 표현대로 `EAGAIN`이 나오기 전까지는 준비된 상태로 간주해야 한다.
+
+### 왜 굳이 ET를 쓰는가
+
+LT가 안전한데 ET를 쓰는 이유는 통지 횟수다. LT에서는 처리 중인 fd가 아직 준비 상태이면 `epoll_wait()`를 부를 때마다 계속 돌아온다. ET는 변화가 있을 때만 깨우므로 불필요한 반복 통지와 시스템 콜이 줄 수 있다.
+
+여러 스레드가 같은 epoll fd에서 기다릴 때도 차이가 난다. 매뉴얼에 따르면 ET fd가 준비되면 기다리던 스레드 중 하나만 깨어난다. 같은 fd를 두 스레드가 동시에 처리하는 일을 확실히 막으려면 `EPOLLONESHOT`을 더한다. 이 플래그는 이벤트를 한 번 전달한 뒤 fd를 비활성화하고, 처리가 끝나면 `EPOLL_CTL_MOD`로 다시 켜게 만든다.
+
+| | LT (기본) | ET (`EPOLLET`) |
+|---|---|---|
+| 통지 시점 | 준비된 동안 매번 | 상태가 바뀔 때 한 번 |
+| 덜 읽었을 때 | 다음 호출에 또 알려줌 | 다시 알려주지 않음 |
+| fd 요구 사항 | 블로킹도 가능 | 논블로킹 필수 |
+| 읽기 규칙 | 원하는 만큼 읽어도 됨 | `EAGAIN`까지 반복 |
+| 장점 | 실수에 너그럽다 | 반복 통지가 적다 |
+| 위험 | 불필요한 깨어남 | 덜 읽으면 연결이 멈춘다 |
+
+### 그래서 생기는 문제
+
+ET에서 "끝까지 읽기"는 공정성 문제를 만든다. 한 연결이 데이터를 계속 쏟아붓으면 그 fd를 비우느라 다른 fd 처리가 밀린다. 매뉴얼은 이것을 기아(starvation)라고 부르고, 준비된 fd를 자체 목록에 올려 두고 돌아가며(round-robin) 조금씩 처리하라고 권한다.
+
+---
+
+## 5. 이 원리 때문에 생기는 문제
+
+멀티플렉싱은 "준비됐다는 통지"와 "fd 하나에 이벤트 하나"라는 단순한 약속 위에 서 있다. 운영에서 만나는 문제 대부분은 이 약속을 오해한 데서 나온다.
+
+### ET에서 덜 읽으면 연결이 멈춘 것처럼 보인다
+
+4절의 2KB 예시가 실제로 일어나는 경우다. 예를 들어 버퍼를 4KB로 잡고 `read()`를 한 번만 부르는 코드가 있다고 하자.
+
+평소에는 요청 하나가 1KB라서 한 번에 다 읽힌다. 문제가 보이지 않는다. 부하가 커지면 요청 여러 개가 소켓 버퍼에 한꺼번에 쌓여 10KB가 된다. 4KB만 읽고 나머지 6KB는 남는다. ET는 새 데이터가 오기 전까지 다시 알려주지 않는다. 클라이언트가 응답을 기다리느라 아무것도 보내지 않으면 연결은 그대로 멈춘다.
+
+증상은 "부하가 클 때만, 일부 연결이 간헐적으로 응답하지 않음"이다. 재현이 어려워서 찾는 데 오래 걸린다.
+
+### 쓰기 쪽: 송신 버퍼가 가득 찰 때
+
+읽기만 문제가 아니다. 큰 응답을 `write()`하다가 커널 송신 버퍼가 가득 차면 `write()`가 `EAGAIN`을 낸다. 이때 남은 데이터를 보관하고 `EPOLLOUT`(쓰기 가능 이벤트)을 등록해 두어야 한다. 등록하지 않으면 버퍼가 비어도 아무도 깨워주지 않아 응답이 중간에 멈춘다.
+
+반대로 LT에서 `EPOLLOUT`을 계속 켜 두면 안 된다. 소켓은 대부분의 시간에 쓰기 가능하므로 `epoll_wait()`가 매번 즉시 돌아와 CPU를 태운다. 보낼 데이터가 남았을 때만 켜고, 다 보내면 끈다.
+
+### 몰려드는 무리(thundering herd)
+
+워커 프로세스 8개가 각자 epoll 인스턴스를 만들고 같은 listen 소켓을 등록했다고 하자. 연결 하나가 들어오면 8개 워커가 모두 깨어난다. `accept()`에 성공하는 것은 하나뿐이고, 나머지 7개는 `EAGAIN`을 받고 다시 잔다. 연결이 초당 수만 개라면 이 헛걸음이 CPU를 상당히 먹는다. 이것을 thundering herd라고 부른다.
+
+`epoll_ctl(2)` 매뉴얼에 따르면 기본 동작은 모든 epoll fd가 이벤트를 받는 것이다. Linux 4.5에서 추가된 `EPOLLEXCLUSIVE`를 주면 일부 대기자만 깨워 이 문제를 줄인다.
+
+다른 방법은 `SO_REUSEPORT`다. 워커마다 같은 포트로 자기 listen 소켓을 따로 열고, 커널이 새 연결을 소켓들에 나눠 준다. 깨울 대상이 처음부터 하나다. 대신 트레이드오프가 있다. Marek Majkowski의 분석에 따르면 listen 소켓 하나를 닫을 때 그 소켓의 accept 큐에서 기다리던 연결은 버려진다. 워커를 재시작할 때 연결이 끊길 수 있다는 뜻이다. accept 큐 자체는 [TCP 핸드셰이크 글](/posts/cs/network/tcp-handshake-syn-accept-queue)에서 다룬다.
+
+| 방법 | 동작 | 대가 |
+|---|---|---|
+| `EPOLLEXCLUSIVE` (Linux 4.5+) | 이벤트 하나에 일부 대기자만 깨움 | 커널 버전 요구 |
+| `SO_REUSEPORT` | 워커마다 listen 소켓, 커널이 분배 | 소켓을 닫을 때 큐의 연결 유실 |
+| accept 전담 스레드 | 한 스레드가 accept하고 워커에 넘김 | 넘기는 비용, 그 스레드가 병목 가능 |
+
+### fd와 "열린 파일 설명"의 차이
+
+epoll은 fd 번호가 아니라 그 뒤의 커널 객체를 감시한다. 이 객체를 열린 파일 설명(open file description)이라고 한다. `dup()`이나 `fork()`를 하면 fd 번호는 늘어나도 열린 파일 설명은 하나를 공유한다.
+
+`epoll(7)` 매뉴얼에 따르면 fd가 관심 목록에서 빠지는 것은 같은 열린 파일 설명을 가리키는 fd가 **모두** 닫힌 뒤다. fd 7을 `dup()`해 fd 8을 만들고 fd 7만 닫으면, 이미 닫은 fd 7에 대한 이벤트가 계속 올 수 있다. 그래서 복제하거나 닫기 전에 `EPOLL_CTL_DEL`로 명시적으로 빼야 한다.
+
+배치 처리 중에도 비슷한 함정이 있다. `epoll_wait()`가 이벤트 100개를 돌려줬는데 47번째 이벤트를 처리하다 13번째 fd를 닫았다고 하자. 매뉴얼은 이런 경우를 위해 닫은 fd를 "제거됨"으로 표시해 두고, 남은 이벤트에서 무시하라고 권한다.
+
+### fd 고갈과 accept 바쁜 루프
+
+프로세스의 fd 한도(`ulimit -n`)에 닿으면 `accept()`가 `EMFILE`로 실패한다. 연결은 커널의 accept 큐에 그대로 남는다. LT 모드라면 listen 소켓은 계속 "준비됨"이다. 루프는 깨어나서 `accept()`에 실패하고, 다시 깨어나기를 반복한다. 일은 하나도 못 하면서 CPU를 100% 쓴다.
+
+한도를 올리는 것이 기본 대책이다. 그와 함께 `EMFILE`이 나면 잠시 listen 소켓 감시를 멈추는 식으로 루프가 헛돌지 않게 막는다.
+
+### 이벤트 루프를 막는 핸들러
+
+멀티플렉싱은 동시성(concurrency)을 주지만 병렬성(parallelism)을 주지 않는다. 동시성은 여러 일을 번갈아 진행하는 것이고, 병렬성은 여러 일을 정말 같은 순간에 실행하는 것이다.
+
+루프 스레드 하나가 연결 10,000개를 맡고 있다. 그중 한 핸들러가 200ms 걸리는 계산이나 동기 DB 호출을 하면, 그 200ms 동안 나머지 9,999개 연결의 이벤트는 아무도 처리하지 않는다.
+
+### 증상에서 원인으로
+
+"부하가 클 때만 일부 연결이 멈춘 듯 응답이 없다"는 증상 하나에 원인 후보가 여럿이다.
+
+| 원인 후보 | 확인 방법 |
+|---|---|
+| ET에서 `EAGAIN`까지 읽지 않음 | `strace`로 `read()`가 `EAGAIN`으로 끝나는지 확인 |
+| 송신 버퍼가 찼는데 `EPOLLOUT` 미등록 | `ss`로 소켓의 송신 큐(Send-Q)가 쌓였는지 확인 |
+| fd 한도 도달 (`EMFILE`) | `/proc/<pid>/fd` 개수와 `ulimit -n` 비교 |
+| 핸들러가 루프를 막음 | 루프 지연(loop lag) 지표, 프로파일러 |
+
+---
+
+## 6. io_uring: SQ/CQ 링, 시스템 콜 횟수 줄이기
+
+### 왜 필요한가
+
+epoll까지 와도 두 가지가 남는다.
+
+첫째, 준비 통지뿐이라 데이터 복사는 여전히 시스템 콜 하나씩이다. 준비된 소켓이 10개면 `epoll_wait()` 1번에 `read()` 10번, ET라면 `EAGAIN`을 확인하는 `read()` 10번이 더 붙는다. 이벤트 한 묶음에 시스템 콜이 21번이다.
+
+둘째, 일반 파일에는 준비 통지가 통하지 않는다. 그래서 Node.js의 libuv는 파일 I/O를 별도 스레드 풀에 맡긴다. libuv 문서는 그 이유를 기댈 수 있는 플랫폼별 파일 I/O 기본 수단이 없기 때문이라고 설명한다.
+
+Linux에도 원래 비동기 I/O 인터페이스(aio)가 있었다. io_uring을 만든 Jens Axboe는 "Efficient IO with io_uring"에서 aio의 한계를 이렇게 정리했다.
+
+- 캐시를 우회하는 `O_DIRECT` 접근에만 비동기로 동작한다. 일반(버퍼드) I/O에서는 동기처럼 동작한다.
+- 조건을 다 맞춰도 메타데이터가 필요하거나 장치의 요청 슬롯이 다 차면 제출 단계에서 블록된다.
+- I/O 하나에 제출에서 64+8바이트, 완료에서 32바이트, 합쳐서 104바이트를 복사한다.
+- I/O마다 최소 두 번(제출, 완료 대기)의 시스템 콜이 필요하다.
+
+io_uring은 이 문제들을 풀려고 나왔고, Linux 5.1(2019년 5월)에 들어갔다.
+
+### 핵심 아이디어
+
+**애플리케이션과 커널이 공유 메모리에 링 버퍼 두 개를 두고, 요청은 제출 큐(SQ)에, 결과는 완료 큐(CQ)에 넣고 꺼낸다. 복사도 락도 없고, 여러 요청을 시스템 콜 한 번에 몰아 보낼 수 있다.**
+
+- 제출 큐(submission queue, SQ): 애플리케이션이 요청을 넣고 커널이 꺼내는 링이다. 요청 하나를 SQE(submission queue entry)라고 부른다.
+- 완료 큐(completion queue, CQ): 커널이 결과를 넣고 애플리케이션이 꺼내는 링이다. 결과 하나를 CQE(completion queue entry)라고 부른다.
+
+### 왜 링 두 개인가
+
+Axboe는 설계 출발점을 복사와 공유 락을 없애는 것으로 설명한다. 애플리케이션과 커널이 락을 공유하려면 시스템 콜이 필요하다. 그러면 효율 목표와 충돌한다.
+
+답은 단일 생산자-단일 소비자(single producer, single consumer) 링 버퍼였다. 생산자가 하나, 소비자가 하나면 락 없이 메모리 배리어만으로 안전하게 주고받을 수 있다. 이 구조의 원리는 [SPSC 링 버퍼 글](/posts/cs/architecture/ring-buffer-spsc)에서 자세히 다룬다.
+
+제출과 완료는 방향이 반대라서 링도 두 개다.
+
+```
+          application (user space)                   kernel
+          ------------------------                   ------
+SQ ring   producer: writes SQE, moves tail  ---->    consumer: reads SQE, moves head
+CQ ring   consumer: reads CQE, moves head   <----    producer: writes CQE, moves tail
+
+ SQ:  head                 tail             CQ:  head        tail
+       |                    |                     |           |
+       v                    v                     v           v
+   +-----+-----+-----+-----+-----+         +-----+-----+-----+-----+
+   | sqe | sqe | sqe |     |     |         | cqe | cqe |     |     |
+   +-----+-----+-----+-----+-----+         +-----+-----+-----+-----+
+     kernel takes from head                  app takes from head
+```
+
+각 링에서 tail은 생산자만, head는 소비자만 움직인다. 덕분에 양쪽이 같은 변수를 동시에 쓰지 않는다.
+
+### 단계별 동작: 소켓 10개 읽기
+
+2절과 같은 상황에서 활성 소켓 10개를 읽는다고 하자.
+
+1. 준비: `io_uring_setup()`으로 인스턴스를 만들고, `mmap()`으로 SQ와 CQ를 애플리케이션 메모리에 매핑한다. 이후 링은 커널과 애플리케이션이 같은 메모리를 본다.
+2. 요청 작성: 애플리케이션은 SQ의 tail 위치에 SQE 10개를 채운다. SQE마다 "fd 7에서 이 버퍼로 4KB 읽기" 같은 연산, fd, 버퍼 주소, 그리고 `user_data`를 적는다.
+3. 공개: 메모리 배리어를 두고 tail을 10만큼 전진시킨다. 배리어는 SQE 내용이 tail보다 먼저 보이도록 쓰기 순서를 보장한다.
+4. 제출과 대기: `io_uring_enter(fd, to_submit=10, min_complete=1, IORING_ENTER_GETEVENTS)`를 한 번 부른다. 제출과 완료 대기를 한 시스템 콜로 한다.
+5. 커널 처리: 커널은 SQ의 head부터 SQE를 꺼내 읽기를 수행한다. 데이터가 오면 애플리케이션 버퍼에 복사까지 끝낸다.
+6. 완료: 커널은 CQ의 tail에 CQE를 쓴다. CQE의 `res`에는 해당 시스템 콜이 돌려줬을 값(읽은 바이트 수, 실패하면 음수 에러 코드)이, `user_data`에는 2단계에서 적은 값이 그대로 들어 있다.
+7. 회수: 애플리케이션은 CQ의 head부터 CQE를 읽고 head를 전진시킨다.
+
+완료는 제출 순서와 다르게 올 수 있다. fd 7을 먼저 제출해도 fd 921이 먼저 끝날 수 있다. 그래서 `user_data`에 요청을 구분할 값(보통 요청 객체의 포인터)을 넣어 두고 CQE와 짝을 맞춘다.
+
+### 시스템 콜 횟수 비교
+
+| 방식 | 소켓 10개를 한 번 읽는 데 드는 시스템 콜 |
+|---|---|
+| 블로킹, 스레드 10개 | `read()` 10번 (스레드마다 1번) |
+| epoll LT | `epoll_wait()` 1번 + `read()` 10번 = 11번 |
+| epoll ET | `epoll_wait()` 1번 + `read()` 10번 + `EAGAIN` 확인 `read()` 10번 = 21번 |
+| io_uring | `io_uring_enter()` 1번 |
+| io_uring + SQPOLL | 바쁜 동안 0번 |
+
+마지막 줄의 SQPOLL은 커널 쪽 폴링 모드다. `IORING_SETUP_SQPOLL`로 만들면 커널 스레드가 SQ를 계속 살피다가 새 SQE를 발견하면 알아서 제출한다. 애플리케이션은 SQ에 쓰기만 하면 되고 `io_uring_enter()`를 부를 필요가 없다.
+
+그 커널 스레드는 CPU를 계속 쓰므로, 한동안 할 일이 없으면 잠든다. 그 시간은 `sq_thread_idle`(밀리초)로 정하고, 지정하지 않으면 1초다. 잠들면 SQ에 `IORING_SQ_NEED_WAKEUP` 플래그를 켠다. 애플리케이션은 이 플래그를 보고 `io_uring_enter()`로 깨워야 한다. 처음에는 SQPOLL에 특권이 필요했지만, `io_uring_setup(2)` 매뉴얼에 따르면 5.13부터는 특별한 권한 없이 쓸 수 있다.
+
+### 성능 숫자와 그 의미
+
+Axboe의 문서(버전 0.4, 2019-10-15)는 4KB 무작위 읽기 기준으로 이런 숫자를 보고했다.
+
+| 구성 | 4KB IOPS |
+|---|---|
+| io_uring, 폴링 사용 | 약 1.7M |
+| io_uring, 폴링 미사용 | 약 1.2M |
+| aio (폴링 미지원) | 608K에서 성능 한계 |
+
+같은 문서는 폴링 비교가 aio에 공정하지 않고, 이 숫자들은 절대값보다 상대적 개선을 가늠하는 데 의미가 있다고 밝힌다. 폴링을 끈 같은 조건에서도 io_uring이 aio의 약 두 배다.
+
+### 그래서 생기는 문제
+
+| 항목 | 내용 |
+|---|---|
+| 커널 버전 | 5.1 이상이 필요하고, 기능마다 요구 버전이 다르다 |
+| API 복잡도 | 메모리 배리어를 직접 다뤄야 한다. 보통 liburing 라이브러리를 쓴다 |
+| CQ 넘침 | SQE는 커널이 꺼내 가면 바로 재사용할 수 있다. 그래서 SQ 크기보다 많은 요청을 동시에 띄울 수 있고, 그러면 CQ가 넘칠 수 있다. CQ는 기본으로 SQ의 두 배 크기다 |
+| 완료 순서 | 순서가 보장되지 않으므로 `user_data`로 짝을 맞춘다 |
+| 버퍼 수명 | 요청을 넣은 뒤 완료될 때까지 버퍼를 건드리거나 해제하면 안 된다 |
+
+---
+
+## 7. 정리: 이벤트 루프 서버(Netty, Node)와의 연결
+
+지금까지의 내용을 표 하나로 모으면 다음과 같다.
+
+| 방식 | fd 수 한계 | 호출당 비용 | 통지 종류 | 비고 |
+|---|---|---|---|---|
+| 스레드당 연결 (블로킹) | 스레드·메모리 한계 | 스레드 전환 | - | 단순하지만 수천 연결부터 부담 |
+| select | fd 번호 1024 미만 | $O(N)$ 복사 + 스캔 | 준비 | 거의 모든 OS |
+| poll | 제한 없음 | $O(N)$ 복사 + 스캔 | 준비 | POSIX |
+| epoll / kqueue | fd 한도 안 | O(준비된 fd 수) | 준비 | OS 전용, 일반 파일에는 쓸 수 없음 |
+| io_uring | 링 크기 안 | 배치 제출, 폴링 시 0 | 완료 | 파일 I/O에도 적용, Linux 5.1+ |
+
+### 이벤트 루프는 epoll 루프를 감싼 것이다
+
+이벤트 루프(event loop)는 "이벤트를 기다리고, 온 이벤트의 핸들러를 실행하고, 다시 기다리는" 루프다. 3절의 `for (;;)` 코드가 바로 그 뼈대다.
+
+**Node.js.** libuv가 이벤트 루프를 맡는다. libuv 문서에 따르면 Linux에서는 epoll, macOS와 BSD에서는 kqueue로 논블로킹 소켓을 감시한다. 네트워크 I/O는 항상 루프 스레드 하나에서 처리한다. 파일 I/O는 앞서 본 이유로 전역 스레드 풀에서 처리한다. JavaScript 핸들러가 루프 스레드에서 돌기 때문에, 무거운 동기 계산 하나가 서버 전체를 멈춘다. 5절의 "루프를 막는 핸들러" 문제가 그대로 적용된다.
+
+**Netty.** EventLoop 하나가 스레드 하나를 가지고, 여러 채널(연결)을 맡아 같은 패턴의 루프를 돈다. 기본 NIO 전송은 Java NIO의 Selector를 쓰고, Linux용 JDK에서는 그 Selector가 내부적으로 epoll로 구현되어 있다. Netty는 JNI로 epoll을 직접 쓰는 네이티브 전송(`EpollEventLoopGroup`)도 제공한다. 공식 문서는 NIO 기반 전송보다 가비지를 덜 만들고 대체로 성능이 낫다고 설명한다. 핸들러 안에서 블로킹 호출을 하면 같은 EventLoop의 모든 채널이 멈추므로, 블로킹 작업은 별도 실행기(executor)로 넘긴다.
+
+### 무엇을 고를까
+
+| 상황 | 선택 |
+|---|---|
+| 연결 수가 적고 코드가 단순해야 함 | 스레드당 연결도 충분하다 |
+| 연결 많고 활성 비율 낮은 네트워크 서버 | epoll 기반 이벤트 루프 (Netty, Node, nginx) |
+| 시스템 콜 비용이 병목인 고성능 저장소·네트워크 I/O | io_uring |
+| 일반 파일 I/O를 비동기로 | io_uring, 아니면 스레드 풀 |
+
+대부분의 백엔드 개발자는 epoll을 직접 부르지 않는다. 하지만 Netty의 EventLoop나 Node의 이벤트 루프에서 "왜 핸들러에서 블로킹하면 안 되는가", "왜 연결이 간헐적으로 멈추는가"를 설명하려면 결국 이 글의 원리로 내려와야 한다.
+
+---
+
+## 결론
+
+- I/O 모델은 두 축으로 나눈다. 블로킹/논블로킹은 호출이 기다리는가, 동기/비동기는 데이터 복사를 누가 끝내는가다. select, poll, epoll은 준비 통지를 주는 동기 방식이고, io_uring은 완료 통지를 주는 비동기 방식이다.
+- select와 poll은 호출마다 fd 목록 전체를 커널에 넘기고 전체를 훑는다. 비용이 전체 연결 수 N에 비례한다.
+- epoll은 관심 목록을 커널에 한 번 등록하고, 이벤트가 생긴 fd를 콜백으로 준비 목록에 넣는다. `epoll_wait`의 비용은 준비된 fd 수에 비례한다.
+- ET는 상태가 바뀔 때 한 번만 알리므로, 논블로킹 fd로 `EAGAIN`까지 읽어야 한다. 이를 어기면 부하가 클 때만 연결이 멈춘다.
+- io_uring은 공유 메모리의 SQ/CQ 링으로 요청과 결과를 주고받아, 여러 I/O를 시스템 콜 한 번(SQPOLL이면 0번)에 처리한다. 일반 파일 I/O에도 쓸 수 있다.
+
+---
+
+## 출처
+
+- [Linux man-pages, `epoll(7)`](https://man7.org/linux/man-pages/man7/epoll.7.html)
+- [Linux man-pages, `epoll_ctl(2)`](https://man7.org/linux/man-pages/man2/epoll_ctl.2.html)
+- [Linux man-pages, `select(2)`](https://man7.org/linux/man-pages/man2/select.2.html)
+- [Linux man-pages, `io_uring(7)`](https://man7.org/linux/man-pages/man7/io_uring.7.html)
+- [Linux man-pages, `io_uring_setup(2)`](https://man7.org/linux/man-pages/man2/io_uring_setup.2.html)
+- [Jens Axboe, "Efficient IO with io_uring", Version 0.4, 2019-10-15](https://kernel.dk/io_uring.pdf)
+- [The Open Group, POSIX `pselect`/`select`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/pselect.html)
+- [Linux kernel source, `fs/eventpoll.c`](https://github.com/torvalds/linux/blob/master/fs/eventpoll.c)
+- [KernelNewbies, "Linux 5.1"](https://kernelnewbies.org/Linux_5.1)
+- [Jonathan Corbet, "Ringing in a new asynchronous I/O API", LWN, 2019-01-15](https://lwn.net/Articles/776703/)
+- [Marek Majkowski, "Epoll is fundamentally broken 1/2", 2017-02-20](https://idea.popcount.org/2017-02-20-epoll-is-fundamentally-broken-12/)
+- [libuv documentation, "Design overview"](https://docs.libuv.org/en/v1.x/design.html)
+- [Netty, "Native transports"](https://netty.io/wiki/native-transports.html)

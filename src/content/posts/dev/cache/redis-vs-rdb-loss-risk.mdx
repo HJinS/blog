@@ -20,7 +20,7 @@ description: Redis TTL과 RDB 중 어디에 저장할 것인가 — 편의성이
 2. 크로스모듈 정리 완료추적(어떤 모듈이 데이터 정리를 끝냈는지)
 3. 애플 소셜 로그인 revoke를 위한 refresh_token 저장 위치
 
-세 값 다 "Redis에 두면 편할 것 같은데"로 시작했는데, 결론은 둘만 Redis에 남고 하나는 RDB로 갔다. 판단 기준은 접근 속도나 구현 편의성이 아니라 **"이 값이 유실되면 정확히 무슨 일이 생기는가"**였다.
+세 값 다 "Redis에 두면 편할 것 같은데"로 시작했는데, 결론은 둘만 Redis에 남고 하나는 RDB로 갔다. 판단 기준은 접근 속도나 구현 편의성이 아니라 **"이 값이 유실되면 정확히 무슨 일이 생기는가"** 였다.
 
 ---
 
@@ -77,3 +77,11 @@ withdrawal:{userId}:completed_modules  → Set, 멤버는 help/review/communicat
 > 다른 건 그 값을 잃어버렸을 때 시스템이 어느 방향으로 실패하느냐였다
 > - **일시적으로 덜 엄격해지는 방향의 실패는 Redis로 감수할 만하고, 영구적으로 의무를 못 지키는 방향의 실패는 RDB로 막아야 한다.**
 > - "얼마나 자주 읽는가"보다 이러한 질문이 저장소 선택에 훨씬 결정적이었고, 애플 refresh_token 사례처럼 그 판단에 보안이라는 별개의 축이 추가로 얹히는 경우도 있었다.
+
+---
+
+## 관련 글
+
+- [fork()와 Copy-on-Write - Redis BGSAVE 중 메모리가 늘어나는 이유](/posts/cs/os/fork-copy-on-write)
+- [페이지 캐시와 fsync](/posts/cs/os/page-cache-fsync)
+- [복제의 기초와 CAP, PACELC](/posts/cs/distributed/replication-cap-pacelc)

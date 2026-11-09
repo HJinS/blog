@@ -357,7 +357,7 @@ TCP 연결 = (Source IP, Source Port, Dest IP, Dest Port)
       -> 지연, 데이터 손실 가능
 ```
 
-TCP는 연결을 **4-tuple (Source IP, Source Port, Dest IP, Dest Port)**로 식별합니다.
+TCP는 연결을 **4-tuple (Source IP, Source Port, Dest IP, Dest Port)** 로 식별합니다.
 모바일 기기가 Wi-Fi에서 LTE로 전환되면 Source IP가 바뀌므로, TCP에서는 이를 새로운 연결로 봅니다.
 **기존 연결은 자동으로 끊어지고, 새 연결을 위해 다시 3-way handshake를 해야 합니다.**
 
@@ -647,3 +647,16 @@ TCP는 좋은 프로토콜이지만, 모바일 시대에는 QUIC의 유연성이
 - **Mozilla Developer Network (MDN): HTTP**
   - HTTP/1.1, HTTP/2, HTTP/3의 진화 과정
   - 각 프로토콜의 장단점 및 실제 사용 케이스
+
+---
+
+## 관련 글
+
+- [DNS 해석 과정, TTL 캐시, 장애 전파](/posts/cs/network/dns-resolution-ttl)
+- [TCP 연결 수립과 SYN queue, accept queue](/posts/cs/network/tcp-handshake-syn-accept-queue)
+- [TCP 신뢰성 - 시퀀스 번호, ACK, 재전송 타이머, SACK](/posts/cs/network/tcp-reliability-retransmission)
+- [TCP 흐름 제어, Nagle, Delayed ACK](/posts/cs/network/tcp-flow-control-nagle-delayed-ack)
+- [TCP 혼잡 제어 - Slow Start, AIMD, CUBIC, BBR](/posts/cs/network/tcp-congestion-control)
+- [MTU, MSS, Path MTU Discovery와 PMTUD 블랙홀](/posts/cs/network/mtu-mss-pmtud)
+- [TCP 연결 종료: 4-way, TIME_WAIT, CLOSE_WAIT 누수](/posts/cs/network/tcp-close-time-wait)
+- [TLS 1.3 핸드셰이크와 전방 비밀성, 인증서 체인 검증](/posts/cs/network/tls13-handshake)

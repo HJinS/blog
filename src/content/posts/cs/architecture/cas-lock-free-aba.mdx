@@ -1,0 +1,236 @@
+---
+author: 허진수
+pubDatetime: 2026-11-04T05:58:00.000Z
+title: CAS와 lock-free 스택, 그리고 ABA 문제
+featured: false
+draft: false
+tags:
+  - concurrency
+  - lock-free
+  - cas
+  - architecture
+description: CAS 한 번으로 락 없이 스택을 갱신하는 방법과, 값이 A에서 B로 갔다 A로 돌아올 때 CAS가 속는 ABA 문제, 그리고 태그 포인터·hazard pointer·AtomicStampedReference로 막는 방법을 이해한다.
+---
+
+## 개요
+
+[앞 글](/posts/cs/architecture/memory-model-barriers)에서는 CPU와 컴파일러가 메모리 연산 순서를 바꾸는 이유와 배리어를 봤다. 이번 글은 그 위에서 만든 도구인 CAS를 다룬다. CAS는 락 없이 공유 자료구조를 갱신하게 해 주는 CPU 명령이다.
+
+이 글이 답하는 질문은 두 가지다.
+
+- 락 없이 스택을 만들 수 있는 이유는 무엇이고, 그 대가는 무엇인가?
+- CAS가 "값이 같다"만 확인해서 생기는 ABA 문제는 무엇이고 어떻게 막는가?
+
+락 자체(뮤텍스, 세마포어, 스핀락)의 기본은 [뮤텍스, 세마포어, 스핀락](/posts/cs/os/mutex-semaphore-spinlock)에서 다뤘으니 여기서는 반복하지 않는다.
+
+---
+
+## 1. 왜 락 없는 방법이 필요한가
+
+공유 스택에 여러 스레드가 push와 pop을 한다고 하자. 가장 쉬운 방법은 뮤텍스로 스택 전체를 감싸는 것이다. 정확성을 검증하기 쉽고 구현도 단순하다.
+
+문제는 락을 쥔 스레드가 멈출 때 생긴다. 락을 쥔 채로 OS에 선점되거나 페이지 폴트로 오래 멈추면, 락을 기다리는 스레드가 전부 같이 멈춘다. 이를 락 보유자 선점(lock holder preemption) 문제라고 부른다. 우선순위가 낮은 스레드가 락을 쥐면 [우선순위 역전](/posts/cs/os/deadlock-priority-inversion)도 생긴다.
+
+그래서 이런 질문이 나온다. "한 스레드가 중간에 멈춰도 다른 스레드는 계속 진행할 수 없을까?" 이 성질을 가진 설계를 lock-free라고 한다. 이 요구를 하드웨어 명령 하나로 풀어 준 것이 CAS다.
+
+---
+
+## 2. CAS: 비교하고 바꾸는 원자 연산
+
+CAS(Compare-And-Swap)는 "메모리 값이 내가 기대한 값일 때만 새 값으로 바꾼다"를 한 번의 원자 연산으로 수행한다. x86에서는 `lock cmpxchg` 명령이 이 일을 한다. 의사 코드로 쓰면 다음과 같다. 이 전체가 중간에 끼어들 수 없는 한 단계로 실행된다.
+
+```text
+CAS(addr, expected, new):
+    if *addr == expected:
+        *addr = new
+        return true
+    else:
+        return false
+```
+
+핵심 아이디어는 한 문장이다. 값을 읽고, 계산하고, "그 사이 아무도 안 바꿨을 때만" 반영한다.
+
+실패했다면 다른 누군가가 먼저 바꿨다는 뜻이다. 그러면 처음부터 다시 시도하면 된다. 이 재시도 루프(retry loop)가 lock-free 코드의 기본 모양이다.
+
+카운터 증가로 보면 다음과 같다.
+
+| 단계 | 스레드 1 | 스레드 2 | 공유 값 |
+|---|---|---|---|
+| 1 | 읽음: 5 | | 5 |
+| 2 | | 읽음: 5 | 5 |
+| 3 | CAS(5 -> 6) 성공 | | 6 |
+| 4 | | CAS(5 -> 6) 실패, 값이 6이라 기대와 다름 | 6 |
+| 5 | | 다시 읽음: 6, CAS(6 -> 7) 성공 | 7 |
+
+스레드 2는 한 번 실패했지만, 그 실패는 스레드 1이 성공했기 때문이다. 즉 어떤 순간에도 최소 한 스레드는 진행한다. 이것이 lock-free의 정의다. 모든 스레드가 유한한 단계 안에 끝난다고 보장하는 wait-free보다는 약한 보장이다. lock-free에서는 운이 나쁜 스레드 하나가 계속 실패할 수 있다.
+
+---
+
+## 3. lock-free 스택: Treiber 스택
+
+CAS로 만든 가장 유명한 자료구조가 Treiber 스택이다. 연결 리스트의 head 포인터 하나를 CAS로만 바꾼다.
+
+```text
+push(n):
+  loop:
+    old = head.load()
+    n.next = old
+    if CAS(&head, old, n): return
+
+pop():
+  loop:
+    old = head.load()
+    if old == null: return EMPTY
+    next = old.next               // (1) old가 아직 살아 있다고 가정하고 읽는다
+    if CAS(&head, old, next):     // (2) head가 여전히 old 주소인지만 확인한다
+        return old
+```
+
+pop의 순서는 이렇다. head를 읽고(old), old 다음 노드를 읽고(next), head가 아직 old이면 next로 바꾼다. head가 그 사이 바뀌었으면 CAS가 실패하고 처음부터 다시 한다.
+
+주의할 점이 있다. (2)의 CAS는 head가 old와 "같은 주소인지"만 본다. 그 사이에 head가 한 번이라도 바뀌었다가 돌아왔는지는 알 수 없다. 이 틈이 다음 절의 문제다.
+
+---
+
+## 4. ABA 문제: 값이 같다고 상태가 같은 것은 아니다
+
+ABA 문제는 어떤 위치의 값이 A에서 B로 바뀌었다가 다시 A로 돌아오면, CAS가 "아무 일도 없었다"고 착각하는 문제다.
+
+Treiber 스택에서 실제로 일어나는 일을 따라가 보자. 스택은 위에서부터 A, B, C 순서로 쌓여 있다(head는 A를 가리킨다). 스레드 1이 pop을 시작했다.
+
+| 시각 | 스레드 | 동작 | head | 스택 (위에서부터) |
+|---|---|---|---|---|
+| t0 | T1 | pop 시작: old=A, next=B를 읽고 선점되어 멈춤 | A | A, B, C |
+| t1 | T2 | pop() 이 A를 꺼냄 | B | B, C |
+| t2 | T2 | pop() 이 B를 꺼냄, B의 메모리를 해제 | C | C |
+| t3 | T2 | 새 노드를 push했는데 해제된 A의 메모리를 재사용함 (A') | A' (A와 같은 주소) | A', C |
+| t4 | T1 | 깨어나 CAS(head, A, B) 실행. head 주소가 A와 같으므로 성공 | B | B, ? |
+
+t4에서 head는 이미 스택에서 빠진 B를 가리키게 된다. B는 해제됐거나 다른 용도로 쓰이는 메모리다. 스택은 깨졌고, A'와 C는 사라졌다.
+
+```text
+t0 직전          t3 직후 (A'는 A와 같은 주소)     t4 CAS 성공 후
+
+head -> A        head -> A'                       head -> B  (이미 해제됨!)
+        |                 |                              |
+        v                 v                              v
+        B                 C                          (쓰레기)
+        |
+        v
+        C
+```
+
+CAS는 잘못이 없다. "head가 A 주소이면 바꿔라"를 정확히 수행했다. 틀린 것은 "head가 A 주소이면 그 사이 아무 일도 없었다"는 프로그래머의 가정이다. 이 문제는 두 가지가 겹쳐서 생긴다. 해제된 주소가 재사용되고, CAS가 주소 값만 비교한다.
+
+---
+
+## 5. 해결책 세 가지
+
+해결 방향은 두 갈래다. 값이 되풀이되지 않게 만들거나, 누군가 쓰는 동안은 주소를 재사용하지 못하게 한다.
+
+| 방법 | 아이디어 | 얻는 것 | 잃는 것 |
+|---|---|---|---|
+| 태그 포인터(tagged pointer) | 포인터 옆에 버전 번호를 붙여 함께 CAS한다. 바뀔 때마다 번호가 올라가므로 A'와 A는 다른 값이 된다 | 구현이 비교적 단순하다 | 포인터와 카운터를 함께 CAS해야 한다(x86-64의 `cmpxchg16b`, double-width CAS). 카운터가 한 바퀴 돌 가능성은 이론상 남는다 |
+| Hazard pointer | 노드를 읽기 직전에 "이 노드를 쓰는 중"이라고 공개한다. 노드를 해제하려는 쪽은 공개된 노드를 건너뛴다 | 해제 문제(use-after-free)까지 막는다 | 읽을 때마다 공개하고 재확인하는 비용. 순서를 잘못 잡으면 보호가 무력해진다 |
+| Epoch 기반 회수 / RCU | 모든 스레드가 이전 구간(epoch)을 벗어난 뒤에야 노드를 해제한다 | 읽기 경로가 가볍다 | 오래 멈춘 스레드가 있으면 해제가 계속 밀려 메모리가 쌓인다 |
+
+참고로 LL/SC(load-linked/store-conditional)는 값을 비교하지 않고 "읽은 뒤 그 위치에 쓰기가 있었는지"를 추적한다. 그래서 ABA에 강하다. 다만 ARM 같은 구현에서는 다른 이유로도 가끔 실패하는 spurious failure가 있어 재시도 루프가 필수다. 이 내용은 [Wikipedia의 ABA 문서](https://en.wikipedia.org/wiki/ABA_problem)에 정리되어 있다.
+
+hazard pointer를 쓸 때 한 가지 더 알아야 한다. "공개한 뒤 head를 다시 확인한다"는 패턴은 store 뒤에 load가 이어진다. 이 순서는 x86에서도 CPU가 바꿀 수 있다(store buffer 때문이다). [메모리 모델과 배리어](/posts/cs/architecture/memory-model-barriers) 글의 store buffering(SB) 패턴과 같은 모양이다. 그래서 release/acquire 수준으로는 부족하고, seq_cst나 풀 배리어처럼 StoreLoad 순서를 지키는 도구가 필요하다.
+
+---
+
+## 6. Java에서의 ABA: GC가 막아 주는 것과 못 막는 것
+
+GC가 있는 언어는 사정이 다르다. 참조가 살아 있는 객체의 메모리는 GC가 회수하거나 재사용하지 않는다. 앞의 시나리오에서 T1이 A를 들고 있는 한 A의 주소는 다른 노드에 쓰이지 않는다. 그래서 "주소 재사용" 유형의 ABA와 use-after-free는 대부분 사라진다.
+
+하지만 의미 수준의 ABA는 남는다. 노드를 풀(pool)에서 재사용하거나, 값 자체가 A -> B -> A로 돌아오는 경우다. 이때 쓰는 도구가 `AtomicStampedReference`다. 참조와 정수 스탬프(stamp)를 한 쌍으로 묶어 원자적으로 갱신한다. [공식 문서](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/atomic/AtomicStampedReference.html)에 따르면 `compareAndSet`은 현재 참조가 기대 참조와 `==`이고 현재 스탬프가 기대 스탬프와 같을 때만 성공한다.
+
+노드를 재사용하는 Treiber 스택에 적용한 예다.
+
+```java
+import java.util.concurrent.atomic.AtomicStampedReference;
+
+class Node<T> {
+    T value;
+    Node<T> next;
+}
+
+class StampedStack<T> {
+    private final AtomicStampedReference<Node<T>> head =
+        new AtomicStampedReference<>(null, 0);
+
+    public void push(Node<T> n) {
+        int[] stamp = new int[1];
+        while (true) {
+            Node<T> old = head.get(stamp);     // 참조와 스탬프를 함께 읽는다
+            n.next = old;
+            if (head.compareAndSet(old, n, stamp[0], stamp[0] + 1)) return;
+        }
+    }
+
+    public Node<T> pop() {
+        int[] stamp = new int[1];
+        while (true) {
+            Node<T> old = head.get(stamp);
+            if (old == null) return null;
+            Node<T> next = old.next;
+            // 주소가 같아도 스탬프가 바뀌었으면 실패한다
+            if (head.compareAndSet(old, next, stamp[0], stamp[0] + 1)) return old;
+        }
+    }
+}
+```
+
+같은 시나리오를 다시 따라가 보자. T1이 pop을 시작할 때 head는 (A, 스탬프 0)이다.
+
+| 시각 | 동작 | head (참조, 스탬프) |
+|---|---|---|
+| t0 | T1이 (A, 0)을 읽고 멈춤 | (A, 0) |
+| t1 | T2 pop: A를 꺼냄 | (B, 1) |
+| t2 | T2 pop: B를 꺼냄 | (C, 2) |
+| t3 | T2 push: 재사용한 노드 A를 넣음 | (A, 3) |
+| t4 | T1이 compareAndSet(A, B, 0, 1) 실행 | 참조는 A로 같지만 스탬프가 3이라 실패. T1은 처음부터 다시 읽는다 |
+
+참조는 A로 되돌아왔지만 스탬프는 되돌아오지 않는다. CAS가 속지 않는 이유가 이것이다. 스탬프는 int라서 이론상 한 바퀴 돌 수 있다. 하지만 T1이 멈춘 사이 변경 횟수가 정확히 2의 32제곱의 배수여야 하고, 그때 참조까지 같아야 속는다. 실무에서는 사실상 문제가 되지 않는다.
+
+---
+
+## 7. 트레이드오프: lock-free가 항상 더 빠른가
+
+그렇지 않다. 그리고 락이 없다고 더 안전한 것도 아니다. lock-free 코드의 버그는 재현하기 어려운 방식으로 숨는다. 먼저 성능부터 보자.
+
+| 방식 | 진행 보장 | 얻는 것 | 잃는 것 |
+|---|---|---|---|
+| 뮤텍스 | blocking | 구현 단순, 정확성 검증이 쉽다 | 락 보유자가 선점되면 전체가 지연, 데드락과 우선순위 역전 위험 |
+| CAS 루프(lock-free) | 시스템 전체는 항상 진행 | 한 스레드가 멈춰도 나머지는 진행, 데드락 없음 | ABA, 메모리 회수, 메모리 순서 문제. 경합이 높으면 재시도 폭증 |
+| wait-free | 모든 스레드가 유한 단계 | 지연의 상한을 보장 | 알고리즘이 복잡하고 평균 처리량이 낮을 수 있다 |
+
+경합이 높을 때는 CAS가 자주 실패한다. 게다가 모든 스레드가 같은 캐시 라인(head가 있는 곳)의 소유권을 서로 빼앗는다. 실패한 시도는 순수한 낭비다. 반대로 경합이 낮고 임계 구역이 짧으면 CAS가 유리하다. 락을 쥔 스레드의 멈춤에 영향받지 않아 꼬리 지연(tail latency)이 중요한 곳에서도 가치가 있다. 결국 측정해서 결정해야 한다.
+
+버그를 의심해야 하는 신호도 있다. 락프리 큐를 쓰는 서비스에서 며칠에 한 번 segfault나 데이터 유실이 나고 재현이 안 된다면 원인 후보는 세 가지다.
+
+- 해제된 노드를 다른 스레드가 역참조했다(회수 정책의 결함).
+- ABA로 링크가 깨졌다.
+- 메모리 순서가 부족했다. release/acquire로 충분하다고 가정했지만 실제로는 store-load 순서가 필요한 경우다.
+
+대응은 ThreadSanitizer나 ASan, 스트레스 테스트, 모델 체커를 쓰는 것이다. 가능하면 직접 만들지 말고 검증된 라이브러리를 쓰는 편이 안전하다.
+
+---
+
+## 결론
+
+- CAS는 "기대한 값일 때만 바꾼다"를 원자적으로 수행한다. 실패는 곧 누군가 성공했다는 뜻이므로 재시도 루프로 lock-free 구조를 만들 수 있다.
+- lock-free는 스레드 하나가 멈춰도 시스템이 진행한다는 보장이다. 더 빠르다는 보장은 아니며, 경합이 높으면 오히려 느려질 수 있다.
+- ABA는 CAS가 주소나 값의 동일성만 보고 "그 사이에 바뀐 적이 있는지"를 보지 못해 생긴다. 근본 원인은 해제된 주소의 재사용이다.
+- 해결은 버전을 붙이거나(태그 포인터, `AtomicStampedReference`), 쓰는 동안 주소를 재사용하지 못하게 하는 것이다(hazard pointer, epoch).
+- GC 언어는 주소 재사용형 ABA를 대부분 없애 주지만, 객체 풀링이나 값 의미의 ABA는 남는다.
+
+다음 글 [링 버퍼와 SPSC 큐](/posts/cs/architecture/ring-buffer-spsc)에서는 쓰는 주체를 하나로 줄여 CAS조차 필요 없게 만드는 구조를 본다.
+
+---
+
+## 출처
+
+- [Wikipedia - ABA problem](https://en.wikipedia.org/wiki/ABA_problem)
+- [Oracle Java SE 21 API - AtomicStampedReference](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/atomic/AtomicStampedReference.html)

@@ -359,14 +359,13 @@ consumer.commitSync();  // 동기 커밋 (느리지만 안전)
 
 ```java
 // Kafka Transaction API 사용
-producer.beginTransaction();
-
-// 메시지 소비 + 처리 + 저장을 원자적으로
-// -> 중복 처리 원칙적으로 불가능
-// -> 성능 저하
-
 properties.put("transactional.id", "unique-id");
 producer.initTransactions();
+producer.beginTransaction();
+
+// 읽기 -> 처리 -> 쓰기를 "Kafka 안에서" 원자적으로 묶는다
+// -> 출력 토픽에 쓴 메시지와 소비한 offset 커밋이 함께 성공하거나 함께 취소된다
+// -> 외부 DB나 API에 쓴 내용은 이 트랜잭션에 포함되지 않는다 (9절 참고)
 ```
 
 ### Consumer Lag 모니터링
@@ -622,27 +621,36 @@ Consumer 메트릭:
 
 ### Exactly-Once (복잡, 비용)
 
+Kafka 트랜잭션은 **Kafka 토픽에 쓰는 메시지와 소비한 offset 커밋**을 하나의 원자적 단위로 묶는다. 그래서 "읽기 -> 처리 -> 다른 토픽에 쓰기" 순환(Kafka Streams가 하는 일)에서 정확히 한 번 처리가 가능하다.
+
 ```
 Kafka Transaction + Idempotent Producer
 
-producer.beginTransaction();
-try {
-    // 메시지 소비 + DB 저장을 원자적으로
-    ConsumerRecords<K,V> records = consumer.poll(...);
-    
-    for (ConsumerRecord<K,V> record : records) {
-        processAndStore(record);
-    }
-    
-    consumer.commitSync();  // Transaction 내부
-    producer.commitTransaction();
-} catch (Exception e) {
-    producer.abortTransaction();
-    throw e;
-}
+consumer: isolation.level=read_committed, enable.auto.commit=false
+producer: transactional.id 설정 (멱등성은 자동으로 켜진다)
 
-비용: 성능 30-50% 저하
+producer.initTransactions();
+
+while (true) {
+    ConsumerRecords<K,V> records = consumer.poll(...);
+
+    producer.beginTransaction();
+    try {
+        for (ConsumerRecord<K,V> record : records) {
+            producer.send(변환한 결과);      // Kafka 출력 토픽에 쓰기
+        }
+        // 소비한 offset을 같은 트랜잭션에 포함한다 (consumer.commitSync()가 아니다)
+        producer.sendOffsetsToTransaction(offsets, consumer.groupMetadata());
+        producer.commitTransaction();
+    } catch (Exception e) {
+        producer.abortTransaction();
+    }
+}
 ```
+
+**보장하는 범위는 Kafka 안까지다.** 위 루프에서 `send` 대신 외부 DB에 INSERT하면, 그 INSERT는 Kafka 트랜잭션에 들어가지 않는다. DB에 쓴 뒤 트랜잭션이 abort되면 DB 쓰기만 남고, 재처리 때 다시 쓰게 된다. 외부 시스템에 쓰는 경우에는 위의 At-Least-Once 방식대로 멱등하게 처리해야 한다. 자세한 내용은 [멱등성과 정확히 한 번 처리](/posts/cs/distributed/idempotency-exactly-once)를 참고한다.
+
+**비용:** 트랜잭션마다 커밋 마커 쓰기와 트랜잭션 로그 쓰기가 추가되는데, 이 오버헤드는 트랜잭션에 담긴 메시지 수와 무관하게 거의 일정하다. 그래서 메시지를 많이 묶을수록 비용이 작아진다. Confluent의 설명에 따르면 1KB 메시지를 100ms마다 커밋하는 프로듀서는 처리량이 3% 정도만 줄지만, 메시지가 더 작거나 커밋 간격이 더 짧으면 저하가 더 커진다. 트랜잭션을 길게 잡을수록 종단 지연이 늘어나는 것이 트레이드오프다.
 
 ---
 
@@ -682,6 +690,7 @@ Kafka는 단순해 보이지만, 파티셔닝 설계 하나로 시스템의 확�
 | [Apache Kafka JavaDoc - KafkaConsumer](https://kafka.apache.org/31/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html) | Consumer Group 구조, Group Coordinator, Heartbeat, session.timeout.ms, max.poll.interval.ms, ConsumerRebalanceListener |
 | [Apache Kafka JavaDoc - Partitioner](https://kafka.apache.org/31/javadoc/org/apache/kafka/clients/producer/Partitioner.html) | Partitioner 인터페이스, hash 기반 할당, 부하 분산 |
 | [Apache Kafka - A Guide To The Kafka Protocol](https://cwiki.apache.org/confluence/display/KAFKA/A+Guide+To+The+Kafka+Protocol) | Producer/Consumer 프로토콜, ProduceRequest/Response, FetchRequest/Response |
+| [Apache Kafka JavaDoc - KafkaProducer](https://kafka.apache.org/41/javadoc/org/apache/kafka/clients/producer/KafkaProducer.html) | 멱등성 프로듀서, 트랜잭션 프로듀서, `transactional.id`, `sendOffsetsToTransaction` |
 
 ### Confluent 공식 문서
 
@@ -690,3 +699,11 @@ Kafka는 단순해 보이지만, 파티셔닝 설계 하나로 시스템의 확�
 | [Confluent - Kafka Concepts](https://docs.confluent.io/kafka-clients/java/current/overview.html) | Kafka 핵심 개념, Producer/Consumer 동작, partition.assignment.strategy, enable.auto.commit 등 |
 
 - [Confluent - Kafka Concepts](https://docs.confluent.io/kafka-clients/java/current/overview.html) - Kafka 핵심 개념, Producer/Consumer 동작
+- [Confluent - Transactions in Apache Kafka](https://www.confluent.io/blog/transactions-apache-kafka/) - 트랜잭션의 원자적 쓰기, read-process-write 순환, `read_committed`, 트랜잭션 성능(1KB 메시지, 100ms 커밋 간격에서 3% 저하)
+
+---
+
+## 관련 글
+
+- [멱등성과 정확히 한 번 처리](/posts/cs/distributed/idempotency-exactly-once)
+- [일관성 모델과 쿼럼: R+W>N이 선형화를 보장하지 않는 이유](/posts/cs/distributed/consistency-models-quorum)

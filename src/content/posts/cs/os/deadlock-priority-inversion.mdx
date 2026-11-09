@@ -1,0 +1,238 @@
+---
+author: 허진수
+pubDatetime: 2026-11-04T05:42:00.000Z
+title: 데드락과 우선순위 역전
+featured: false
+draft: false
+tags:
+  - os
+  - concurrency
+  - deadlock
+description: 계좌 이체 예시로 데드락이 생기는 과정과 Coffman 4조건을 따라가고, 각 조건을 깨는 방법과 Mars Pathfinder의 우선순위 역전 사례까지 이해한다.
+---
+
+## 개요
+
+[뮤텍스 글](/posts/cs/os/mutex-semaphore-spinlock)에서는 락으로 임계 구역을 지키는 방법을, [앞 글](/posts/cs/os/condition-variable-monitor)에서는 락을 쥔 채 조건을 기다리는 방법을 봤다. 락은 데이터를 지켜 주지만, 락을 두 개 이상 잡기 시작하면 새로운 종류의 문제가 생긴다. 프로그램이 에러 없이 조용히 멈추는 문제다.
+
+이 글이 답하는 질문은 두 가지다.
+
+- 데드락(deadlock)은 정확히 어떤 조건에서 생기고, 그 조건을 어떻게 깨는가?
+- 데드락과 비슷하게 락 때문에 멈추지만 순환이 없는 우선순위 역전(priority inversion)은 무엇이고, 어떻게 풀었는가?
+
+데드락은 둘 이상의 스레드가 서로 상대가 쥔 자원을 기다리느라 영원히 진행하지 못하는 상태를 말한다. 두 문제 모두 "락 때문에 진행이 막히는" 진행성(liveness) 문제라는 점에서 함께 다룬다.
+
+---
+
+## 1. 왜 문제가 되는가: 계좌 이체 타임라인
+
+계좌 A와 B가 있고, 계좌마다 락이 하나씩 있다. 이체는 보내는 계좌와 받는 계좌를 모두 잠가야 한다. 코드는 이렇다.
+
+```java
+void transfer(Account from, Account to, int amount) {
+    synchronized (from) {
+        synchronized (to) {
+            from.balance -= amount;
+            to.balance += amount;
+        }
+    }
+}
+```
+
+스레드 T1은 `transfer(A, B, 10)`, 스레드 T2는 `transfer(B, A, 20)`을 거의 동시에 실행한다. 타이밍이 나쁘면 이렇게 된다.
+
+```
+time   T1: transfer(A, B)         T2: transfer(B, A)
+----   ------------------------   ------------------------
+ t1    lock(A)  OK
+ t2                               lock(B)  OK
+ t3    lock(B)  ... waiting
+ t4                               lock(A)  ... waiting
+ t5    (B is held by T2)          (A is held by T1)
+       -> nobody can proceed, forever
+```
+
+T1은 B를 기다리고, B는 T2가 쥐고 있다. T2는 A를 기다리고, A는 T1이 쥐고 있다. 서로 기다리는 고리가 닫혔으니 누구도 스스로 빠져나올 수 없다.
+
+이 버그는 다루기 까다롭다. 두 스레드가 첫 번째 락을 잡은 직후에 엇갈려야만 발생하기 때문이다. 테스트에서는 통과하고, 운영에서 가끔 터진다. 터지면 CPU를 쓰지 않고 멈추므로 에러 로그도 없다. "요청이 그냥 안 끝나고, 스레드 풀이 서서히 차오르는" 증상으로만 나타난다.
+
+핵심 아이디어는 한 문장이다. **데드락은 누가 누구를 기다리는지를 그린 그래프에 순환이 생긴 상태이고, 그 순환을 만드는 조건은 네 가지로 정리된다.**
+
+---
+
+## 2. Coffman 4조건: 깨면 데드락이 사라지는 조건
+
+Coffman이 정리한 네 조건이 **동시에** 성립할 때만 데드락이 생긴다. 반대로 말하면 하나만 깨도 데드락은 불가능하다. 계좌 이체 예시에 대어 보자.
+
+| 조건 | 의미 | 이체 예시에서는 | 깨면 | 현실에서의 대가 |
+|------|------|----------------|------|----------------|
+| 상호 배제(mutual exclusion) | 자원을 한 번에 한 스레드만 쓴다 | 계좌 락은 한 명만 쥔다 | 락 없이 공유(읽기 전용, lock-free) | 쓰기 자원에는 거의 불가능 |
+| 점유 대기(hold and wait) | 하나를 쥔 채로 다른 것을 기다린다 | A를 쥔 채 B를 기다린다 | 필요한 락을 한 번에 모두 얻는다 | 락 보유 범위와 시간이 늘어 동시성이 떨어진다 |
+| 비선점(no preemption) | 쥔 자원을 강제로 뺏을 수 없다 | T2의 B를 뺏을 수 없다 | 못 얻으면 가진 락을 풀고 재시도한다 | 라이브락과 재시도 비용 |
+| 순환 대기(circular wait) | 기다림이 고리를 이룬다 | T1 -> T2 -> T1 | 모든 락에 전역 순서를 정한다 | 락 집합을 미리 알아야 한다 |
+
+상호 배제와 비선점은 자원의 성격이라서 깨기 어렵다. 점유 대기를 깨면 동시성이 크게 떨어진다. 그래서 실무에서는 순환 대기를 깨는 방법을 가장 많이 쓴다.
+
+---
+
+## 3. 예방 1: 락 순서를 정해 순환 대기를 깬다
+
+모든 코드가 락을 같은 순서로만 잡으면 고리가 만들어질 수 없다. 순서는 아무 기준이나 되지만 전역적으로 하나여야 한다. 계좌라면 id 오름차순이 자연스럽다.
+
+```java
+void transfer(Account from, Account to, int amount) {
+    Account first  = from.id < to.id ? from : to;
+    Account second = from.id < to.id ? to : from;
+    synchronized (first) {
+        synchronized (second) {
+            from.balance -= amount;
+            to.balance += amount;
+        }
+    }
+}
+```
+
+이제 `transfer(A, B)`와 `transfer(B, A)`가 동시에 와도 둘 다 A를 먼저 잡으려 한다.
+
+```
+time   T1: transfer(A, B)         T2: transfer(B, A)
+----   ------------------------   ------------------------
+ t1    lock(A)  OK
+ t2                               lock(A)  ... waiting
+ t3    lock(B)  OK
+ t4    (transfer done) unlock
+ t5                               lock(A)  OK -> lock(B) OK
+```
+
+T2는 A에서 기다릴 뿐 B를 쥐지 않았으므로 T1을 막지 않는다. 기다림은 있어도 순환은 없다.
+
+한계는 두 가지다. 첫째, 어떤 락들을 잡을지 미리 알아야 한다. 둘째, 코드 규율에 의존한다. 한 곳에서라도 순서를 어기면 다시 데드락 가능성이 생긴다.
+
+---
+
+## 4. 예방 2: tryLock으로 비선점을 대체한다
+
+락 순서를 알 수 없다면 "얻지 못하면 포기하고 다시 시도"하는 방법이 있다. 가진 락을 스스로 내려놓아 비선점 조건을 사실상 깬다.
+
+```java
+while (true) {
+    if (a.tryLock(10, MILLISECONDS)) {
+        try {
+            if (b.tryLock(10, MILLISECONDS)) {
+                try { /* work */ break; }
+                finally { b.unlock(); }
+            }
+        } finally { a.unlock(); }
+    }
+    Thread.sleep(random.nextInt(20));   // backoff
+}
+```
+
+여기서 마지막 줄의 무작위 대기가 중요하다. 두 스레드가 동시에 실패하고, 동시에 풀고, 동시에 재시도하면 같은 충돌이 끝없이 반복된다. 이를 라이브락(livelock)이라고 한다. CPU는 계속 쓰지만 진전이 없는 상태다. 재시도 간격을 무작위로 흩어 놓아야 충돌이 풀린다.
+
+---
+
+## 5. 탐지와 복구: 데이터베이스가 택하는 길
+
+예방이 항상 가능한 것은 아니다. 데이터베이스에서는 사용자 쿼리가 어떤 행을 어떤 순서로 잠글지 미리 알 수 없다. 락 순서를 강제하면 쿼리를 크게 제약해야 한다. 그래서 DB는 데드락을 막지 않고 **발생을 허용한 뒤 찾아서 푼다.**
+
+방법은 대기 그래프(wait-for graph)다. 노드는 트랜잭션이고, "T1이 T2가 쥔 락을 기다린다"를 T1 -> T2 간선으로 그린다.
+
+```
+   T1 ---(waits for B)---> T2
+    ^                       |
+    |                       |
+    +----(waits for A)------+
+
+   cycle found -> pick a victim, roll it back
+```
+
+사이클이 보이면 희생자(victim) 하나를 골라 롤백한다. 그 트랜잭션이 쥔 락이 풀리므로 나머지는 진행한다. 사이클 탐색은 노드 수 V, 간선 수 E에 대해 $O(V+E)$다.
+
+InnoDB가 대표적이다. MySQL 문서에 따르면 데드락 탐지는 기본으로 켜져 있고, 데드락이 생기면 트랜잭션 하나를 롤백한다. 탐지를 끄면(`innodb_deadlock_detect`) `innodb_lock_wait_timeout`으로 대기가 끊길 때까지 기다리게 된다. 롤백된 쪽은 `ERROR 1213 (40001): Deadlock found when trying to get lock; try restarting transaction`을 받는다.
+
+여기서 흔한 실수가 생긴다. 문서도 강조하듯 애플리케이션 로직이 올바르더라도 롤백된 트랜잭션을 **재시도하는 코드**는 직접 처리해야 한다. 데드락 자체보다 재시도를 처리하지 않아 사용자 오류로 번지는 경우가 더 흔하다. 갭 락 때문에 생기는 INSERT 데드락의 구체적인 모습은 [InnoDB 갭 락과 넥스트 키 락](/posts/cs/database/innodb-gap-next-key-lock)에서 다룬다.
+
+---
+
+## 6. 운영에서 데드락을 알아보는 법
+
+증상은 이렇다. 특정 시점부터 일부 요청이 끝나지 않고, 요청 스레드가 계속 늘고, CPU와 에러율은 낮다.
+
+확인 순서는 다음과 같다.
+
+1. 스레드 덤프를 몇 초 간격으로 여러 번 뜬다. 같은 스레드가 같은 락을 계속 기다리면 의심이 굳어진다.
+2. 덤프에서 서로를 가리키는 대기 사이클을 찾는다. JVM이라면 `jstack -l`로 덤프를 뜨면 스레드마다 쥔 락과 기다리는 락이 함께 나오므로, 이것을 이어 그리면 사이클이 보인다.
+3. DB 락이라면 `SHOW ENGINE INNODB STATUS`로 최근 데드락을 보고, 대기 중인 트랜잭션과 락 보유 트랜잭션을 조회한다.
+
+조치는 락 순서 통일, 락 범위와 보유 시간 축소, 타임아웃 설정 순으로 한다. MySQL 문서는 트랜잭션을 짧게 유지하고, 모든 트랜잭션이 행과 테이블을 같은 순서로 접근하라고 권한다.
+
+---
+
+## 7. 우선순위 역전: 순환 없이 막히는 경우
+
+이번에는 데드락과 다른 문제다. 스케줄러가 우선순위를 두는 시스템에서 낮은 우선순위 작업 L, 중간 M, 높은 H가 있다고 하자. L과 H는 같은 뮤텍스를 쓴다.
+
+```
+time   H (high)           M (medium)         L (low)
+----   -----------------  -----------------  -----------------
+ t1                                          lock(mutex), run
+ t2    arrives, needs
+       mutex -> blocked
+ t3                       arrives, runs      preempted by M
+ t4                       keeps running      cannot run
+ t5                       done               resumes, unlock
+ t6    gets mutex, runs
+```
+
+H는 L이 락을 풀어야 진행할 수 있다. 그런데 L은 M에게 CPU를 뺏겨서 락을 풀 기회가 없다. 결과적으로 H는 M이 끝날 때까지 기다린다. M은 H와 아무 자원도 공유하지 않는데도 H를 막은 셈이다. 그것도 M의 실행 시간만큼, 즉 임의로 길게 막을 수 있다.
+
+데드락과 비교하면 이렇다.
+
+| 구분 | 데드락 | 우선순위 역전 |
+|------|--------|--------------|
+| 대기 그래프 | 순환이 있다 | 순환이 없다 |
+| 끝나는가 | 영원히 안 끝난다 | M이 끝나면 풀린다 |
+| 원인 | 락 획득 순서 | 스케줄러 우선순위와 락의 상호작용 |
+| 주로 문제 되는 곳 | DB, 일반 서버 | 실시간 시스템 |
+
+해결은 두 가지다.
+
+- 우선순위 상속(priority inheritance): 락을 쥔 L이 기다리는 H의 우선순위를 임시로 물려받는다. L이 M보다 먼저 실행되어 락을 빨리 풀고, 풀면 원래 우선순위로 돌아간다.
+- 우선순위 상한(priority ceiling): 락마다 "이 락을 쓰는 작업 중 가장 높은 우선순위"(ceiling)를 미리 정해 두고, 그 락을 쥐는 동안은 경합이 없어도 그 우선순위로 실행한다. H가 오기 전부터 L이 높은 우선순위로 돌므로 M이 끼어들 틈이 없다. 대신 어떤 작업이 어떤 락을 쓰는지 미리 분석해 ceiling을 정해야 한다. POSIX에서는 뮤텍스 속성 `PTHREAD_PRIO_INHERIT`가 상속, `PTHREAD_PRIO_PROTECT`가 상한에 해당한다.
+
+---
+
+## 8. 사례: Mars Pathfinder (1997)
+
+화성에 착륙한 Pathfinder는 얼마 뒤부터 간헐적으로 컴퓨터가 스스로 리셋되는 문제를 겪었다. 비행 소프트웨어 담당 엔지니어 Glenn Reeves가 1997년 12월에 쓴 설명이 공개되어 있다. 요지는 다음과 같다.
+
+- 실시간 OS인 VxWorks 위에서 여러 작업이 돌았다. 정보 버스를 관리하는 `bc_sched`는 최고 우선순위 계열이고, 버스 데이터를 분배하는 `bc_dist`는 그다음으로 높았다. 기상 관측 작업 `ASI/MET`은 낮았다.
+- `select()` 구현은 파일 디스크립터 목록을 보호하는 뮤텍스를 썼다. 낮은 우선순위의 ASI/MET이 이 뮤텍스를 쥔 채 선점당했다.
+- 그 사이 중간 우선순위 작업들이 실행되어 ASI/MET이 락을 풀지 못했고, 높은 우선순위인 `bc_dist`는 락을 얻지 못해 마감을 넘겼다.
+- 매 주기 `bc_dist`가 끝났는지 확인하던 `bc_sched`가 마감 초과를 오류로 판단했고, 시스템은 컴퓨터를 리셋했다. RAM에 모아 둔 데이터는 보존됐지만 그날의 나머지 활동은 다음 날로 밀렸다.
+
+앞 절의 H, M, L이 그대로 나타난 사례다. 팀은 같은 활동을 돌리며 트레이스 도구를 켜 두고 실험실에서 문제를 재현했는데, 18시간이 걸리지 않았다고 한다. 재현하자 우선순위 역전임이 분명해졌다.
+
+해결은 코드 재작성이 아니라 설정 하나였다. `selectLib`의 전역 변수를 바꿔 `select` 뮤텍스를 우선순위 상속이 켜진 채로 만들게 한 패치를 탐사선에 올렸다. 상속 옵션이 처음부터 있었지만 꺼져 있었던 것이다. 이 사례는 락을 쓰는 이상, 스케줄러와의 상호작용까지 보아야 한다는 점을 보여 준다.
+
+---
+
+## 결론
+
+- 데드락은 상호 배제, 점유 대기, 비선점, 순환 대기가 모두 성립할 때만 생기고, 하나만 깨도 사라진다.
+- 실무에서는 락에 전역 순서를 정해 순환 대기를 깨는 방법이 가장 흔하다. 락 순서를 모를 때는 tryLock과 무작위 백오프를 쓰되, 라이브락을 조심한다.
+- DB는 락 순서를 미리 정하기 어려워서 대기 그래프의 사이클을 탐지하고 희생자를 롤백한다. 롤백된 트랜잭션의 재시도는 애플리케이션 몫이다.
+- 우선순위 역전은 순환 없이도 높은 우선순위 작업이 중간 작업에 간접적으로 막히는 현상이며, 우선순위 상속이나 상한으로 푼다.
+
+여기까지가 CPU와 락 이야기다. [다음 글](/posts/cs/os/virtual-memory-page-table-tlb)부터는 메모리로 넘어가, 프로세스마다 자기만의 주소 공간을 갖게 해 주는 가상 메모리를 본다.
+
+---
+
+## 출처
+
+- Glenn Reeves, "What really happened on Mars?" (1997-12-15), [Mars Pathfinder 우선순위 역전 설명](https://www.cs.cornell.edu/courses/cs614/1999sp/papers/pathfinder2.html)
+- MySQL 8.0 Reference Manual, [InnoDB Deadlocks](https://dev.mysql.com/doc/refman/8.0/en/innodb-deadlocks.html)
+- MySQL 8.0 Error Reference, [Server Error Message Reference (1213 ER_LOCK_DEADLOCK)](https://dev.mysql.com/doc/mysql-errors/8.0/en/server-error-reference.html)
+- [jstack, JDK 21 Tool Specifications](https://docs.oracle.com/en/java/javase/21/docs/specs/man/jstack.html)
+- [pthread_mutexattr_setprotocol, POSIX.1-2024 (The Open Group)](https://pubs.opengroup.org/onlinepubs/9799919799/functions/pthread_mutexattr_setprotocol.html)
