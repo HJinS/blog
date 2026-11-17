@@ -21,7 +21,7 @@ description: InnoDB 세컨더리 인덱스가 왜 PK를 거쳐 행을 찾는지,
 - InnoDB의 세컨더리 인덱스는 왜 행의 위치 대신 PK를 저장할까?
 - 그래서 PK를 UUID로 잡으면 무엇이 느려질까?
 
-B+tree의 구조(리프끼리 연결되고, 페이지 단위로 읽고, 가득 차면 split하는 것)는 [B+tree vs LSM-tree](/posts/cs/database/b-tree-vs-lsm-tree)에서 다뤘다. 이 글은 그 내용을 알고 있다고 가정한다.
+B+tree의 구조(리프끼리 연결되고, 페이지 단위로 읽고, 가득 차면 split하는 것)는 [B+tree vs LSM-tree](/posts/cs/database/b-tree-vs-lsm-tree/)에서 다뤘다. 이 글은 그 내용을 알고 있다고 가정한다.
 
 ## 1. 인덱스 리프에 무엇을 넣을 것인가
 
@@ -227,7 +227,7 @@ UUID v4는 무작위 값이라 새 행이 어느 리프에 들어갈지 알 수 
 
 `birth_year` 컬럼 하나를 바꾸는 UPDATE를 생각한다. 인덱스는 PK, (first, last), `birth_year` 세 개다.
 
-PostgreSQL은 기존 행을 고치지 않고 새 버전(튜플)을 만든다. 새 튜플은 새 위치(새 ctid)를 갖는다. 인덱스가 ctid를 가리키므로 모든 인덱스에 새 위치를 써야 한다. 옛 버전을 남기는 이유는 [MVCC 글](/posts/cs/database/mvcc-snapshot-isolation-write-skew)에서 다룬다.
+PostgreSQL은 기존 행을 고치지 않고 새 버전(튜플)을 만든다. 새 튜플은 새 위치(새 ctid)를 갖는다. 인덱스가 ctid를 가리키므로 모든 인덱스에 새 위치를 써야 한다. 옛 버전을 남기는 이유는 [MVCC 글](/posts/cs/database/mvcc-snapshot-isolation-write-skew/)에서 다룬다.
 
 ```text
 PostgreSQL:  새 튜플 1 + 인덱스 3개 = 최소 4번의 쓰기 (+ 각각 WAL 기록)
@@ -262,7 +262,7 @@ Uber Engineering은 2016년 7월 26일 글에서 위 구조 차이를 이유로 
 
 EnterpriseDB의 Robert Haas는 인덱스 컬럼을 갱신할 때의 쓰기 증폭과 내장 논리 복제의 부재를 실제 약점으로 인정하고, 다른 저장 형식을 붙일 수 있는 구조가 필요하다고 썼다.
 
-따라서 이 사례는 "어느 쪽이 낫다"가 아니라, 구조 차이가 쓰기 패턴에 따라 비용을 어떻게 바꾸는지 보여 주는 사례로 읽는 것이 좋다. 복제 쪽 이야기는 [WAL과 크래시 복구](/posts/cs/database/wal-aries-crash-recovery)에서 다시 짚는다.
+따라서 이 사례는 "어느 쪽이 낫다"가 아니라, 구조 차이가 쓰기 패턴에 따라 비용을 어떻게 바꾸는지 보여 주는 사례로 읽는 것이 좋다. 복제 쪽 이야기는 [WAL과 크래시 복구](/posts/cs/database/wal-aries-crash-recovery/)에서 다시 짚는다.
 
 ## 8. 트레이드오프 정리
 
@@ -290,7 +290,7 @@ InnoDB에서 PK를 고르는 실용적 기준을 정리하면 다음과 같다.
 - PK는 모든 세컨더리 인덱스에 복사되므로 짧을수록 좋고, 랜덤 PK는 페이지 분할과 캐시 미스를 늘린다.
 - 쓰기 증폭의 정도는 인덱스 개수와 구조(힙인지 클러스터드인지)에 달려 있고, 어느 쪽이 항상 낫지는 않다.
 
-인덱스는 "키로 행을 빨리 찾는 구조"다. 이어지는 글 [조인 알고리즘과 카디널리티 추정](/posts/cs/database/join-algorithms-cardinality)에서는 인덱스가 있느냐 없느냐가 두 테이블을 합치는 방법을 어떻게 바꾸는지 본다.
+인덱스는 "키로 행을 빨리 찾는 구조"다. 이어지는 글 [조인 알고리즘과 카디널리티 추정](/posts/cs/database/join-algorithms-cardinality/)에서는 인덱스가 있느냐 없느냐가 두 테이블을 합치는 방법을 어떻게 바꾸는지 본다.
 
 ## 출처
 

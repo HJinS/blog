@@ -13,7 +13,7 @@ description: store buffering 리트머스 테스트 하나로 store buffer, x86-
 
 ## 개요
 
-[앞 글](/posts/cs/architecture/pipeline-branch-prediction-spectre)에서는 CPU가 명령을 순서대로 실행하지 않는다는 것을 봤다. 그래도 한 스레드 안에서는 결과가 프로그램 순서대로 실행한 것과 같다. 문제는 스레드가 둘 이상일 때다. 다른 코어에서 보면 내 쓰기와 읽기의 순서가 뒤바뀌어 보일 수 있다.
+[앞 글](/posts/cs/architecture/pipeline-branch-prediction-spectre/)에서는 CPU가 명령을 순서대로 실행하지 않는다는 것을 봤다. 그래도 한 스레드 안에서는 결과가 프로그램 순서대로 실행한 것과 같다. 문제는 스레드가 둘 이상일 때다. 다른 코어에서 보면 내 쓰기와 읽기의 순서가 뒤바뀌어 보일 수 있다.
 
 이 글은 아래 네 줄짜리 코드 하나로 끝까지 간다.
 
@@ -78,7 +78,7 @@ SC에서 가능한 순서는 6가지다. 전부 따라가 보자.
 
 ### 왜 store buffer가 필요한가
 
-코어가 메모리에 값을 쓰려면 그 캐시 라인을 독점 상태로 가져와야 한다. 다른 코어가 같은 라인을 갖고 있으면 무효화 메시지를 보내고 응답을 기다려야 한다. 이 과정은 [MESI 글](/posts/cs/architecture/cache-coherence-mesi-false-sharing)에서 봤다.
+코어가 메모리에 값을 쓰려면 그 캐시 라인을 독점 상태로 가져와야 한다. 다른 코어가 같은 라인을 갖고 있으면 무효화 메시지를 보내고 응답을 기다려야 한다. 이 과정은 [MESI 글](/posts/cs/architecture/cache-coherence-mesi-false-sharing/)에서 봤다.
 
 쓰기 하나마다 이 왕복을 기다리면 코어는 그동안 놀게 된다. 그래서 거의 모든 현대 CPU는 쓰기를 일단 코어 전용 대기열에 넣고 바로 다음 명령으로 넘어간다. 이 대기열이 store buffer다.
 
@@ -431,7 +431,7 @@ SB를 막는 것은 volatile 쓰기 뒤의 StoreLoad다. x86에서는 다른 셋
 
 ### 생기는 문제
 
-volatile은 SB와 MP를 모두 막지만, 모든 쓰기에 StoreLoad 비용을 낸다. 그리고 volatile은 개별 읽기와 쓰기의 순서만 보장한다. `count++`처럼 읽고-수정하고-쓰는 연산은 여전히 원자적이지 않다. 이것은 [다음 글](/posts/cs/architecture/cas-lock-free-aba)의 CAS가 다룬다.
+volatile은 SB와 MP를 모두 막지만, 모든 쓰기에 StoreLoad 비용을 낸다. 그리고 volatile은 개별 읽기와 쓰기의 순서만 보장한다. `count++`처럼 읽고-수정하고-쓰는 연산은 여전히 원자적이지 않다. 이것은 [다음 글](/posts/cs/architecture/cas-lock-free-aba/)의 CAS가 다룬다.
 
 ---
 
@@ -463,7 +463,7 @@ volatile은 SB와 MP를 모두 막지만, 모든 쓰기에 StoreLoad 비용을 �
 - ARM은 서로 다른 주소에 대한 네 가지 재정렬을 모두 허용한다. x86에서 우연히 동작하던 MP 코드가 ARM에서 깨진다.
 - SB를 막으려면 StoreLoad 순서가 필요하다. 하드웨어로는 `MFENCE`, `LOCK` 명령, `DMB`이고, 언어로는 C++ seq_cst와 Java volatile이다. C++ acquire/release로는 막지 못한다.
 
-다음 글 [CAS와 lock-free 스택, ABA](/posts/cs/architecture/cas-lock-free-aba)에서는 이 순서 보장 위에서 읽고-수정하고-쓰기를 원자적으로 하는 CAS를 다룬다.
+다음 글 [CAS와 lock-free 스택, ABA](/posts/cs/architecture/cas-lock-free-aba/)에서는 이 순서 보장 위에서 읽고-수정하고-쓰기를 원자적으로 하는 CAS를 다룬다.
 
 ---
 

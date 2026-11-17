@@ -79,7 +79,7 @@ description: 디스크에 데이터를 저장하는 두 가지 대표 구조인 
 1. 키가 속한 리프 페이지를 찾는다.
 2. 그 페이지를 메모리에서 고치고 디스크에 다시 쓴다.
 3. 페이지가 가득 차 있으면 둘로 쪼갠다(split). 부모 노드도 고쳐야 한다.
-4. 크래시에 대비해 **WAL**(Write-Ahead Log)을 먼저 쓴다. 변경 내용을 순차 로그에 먼저 남기는 방식이다. 자세한 동작은 [WAL과 크래시 복구](/posts/cs/database/wal-aries-crash-recovery)에서 다룬다.
+4. 크래시에 대비해 **WAL**(Write-Ahead Log)을 먼저 쓴다. 변경 내용을 순차 로그에 먼저 남기는 방식이다. 자세한 동작은 [WAL과 크래시 복구](/posts/cs/database/wal-aries-crash-recovery/)에서 다룬다.
 
 ### 생기는 문제
 
@@ -247,7 +247,7 @@ OLTP(Online Transaction Processing)는 주문, 결제처럼 짧은 트랜잭션�
 | 쓰기 증폭 | 페이지 단위 + WAL | 컴팩션으로 반복 재작성 |
 | 공간 증폭 | 페이지 빈 공간 | 옛 값과 톰스톤, 전략에 따라 다름 |
 
-B+tree로 인덱스를 만든다고 해서 그 인덱스가 데이터 자체를 담는지, 데이터 위치만 가리키는지는 별개의 문제다. 이어지는 글 [클러스터드 인덱스 vs 세컨더리 인덱스](/posts/cs/database/clustered-vs-secondary-index)에서 B+tree가 실제 인덱스로 쓰일 때의 차이를 살펴본다.
+B+tree로 인덱스를 만든다고 해서 그 인덱스가 데이터 자체를 담는지, 데이터 위치만 가리키는지는 별개의 문제다. 이어지는 글 [클러스터드 인덱스 vs 세컨더리 인덱스](/posts/cs/database/clustered-vs-secondary-index/)에서 B+tree가 실제 인덱스로 쓰일 때의 차이를 살펴본다.
 
 ---
 

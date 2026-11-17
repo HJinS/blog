@@ -18,7 +18,7 @@ description: 분산 시스템에서 물리 시각으로 순서를 정하면 왜 
 - 이벤트 순서를 서버의 물리 시각으로 정하면 왜 틀리는가?
 - 시각 없이 순서를 정하는 Lamport 시계와 벡터 시계는 무엇을 보장하고 무엇을 보장하지 못하는가?
 
-여기서 물리 시계(physical clock)는 서버가 가진 실제 시각(벽시계, wall clock)이다. 논리 시계(logical clock)는 시각이 아니라 이벤트 사이의 인과 관계를 세는 카운터다. 복제에서 이 문제가 어떻게 이어지는지는 [다음 글](/posts/cs/distributed/replication-cap-pacelc)에서 다룬다.
+여기서 물리 시계(physical clock)는 서버가 가진 실제 시각(벽시계, wall clock)이다. 논리 시계(logical clock)는 시각이 아니라 이벤트 사이의 인과 관계를 세는 카운터다. 복제에서 이 문제가 어떻게 이어지는지는 [다음 글](/posts/cs/distributed/replication-cap-pacelc/)에서 다룬다.
 
 ---
 
@@ -203,7 +203,7 @@ HLC는 물리 시각 부분과 논리 카운터를 합친 시계다. TrueTime은
 - 간격은 단조 시계로 재고, 순서는 인과 관계(happens-before)로 다룬다.
 - Lamport 시계는 `a -> b`이면 `C(a) < C(b)`를 보장하지만 역은 성립하지 않아 동시성을 감지하지 못한다.
 - 벡터 시계는 원소별 비교로 인과와 동시를 정확히 구분한다. 비용은 노드 수에 비례하는 메타데이터다.
-- 복제된 데이터에서 이 선택이 일관성과 어떻게 맞물리는지는 [다음 글](/posts/cs/distributed/replication-cap-pacelc)에서 이어 본다.
+- 복제된 데이터에서 이 선택이 일관성과 어떻게 맞물리는지는 [다음 글](/posts/cs/distributed/replication-cap-pacelc/)에서 이어 본다.
 
 ---
 

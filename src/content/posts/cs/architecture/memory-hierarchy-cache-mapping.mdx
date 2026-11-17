@@ -14,7 +14,7 @@ description: 메모리 계층의 지연 차이와 지역성에서 출발해, 캐
 
 ## 개요
 
-[앞 글](/posts/cs/architecture/number-representation-memory-layout)에서는 숫자와 구조체가 메모리에 어떤 바이트로 놓이는지 봤다. 이번 글은 그 바이트를 CPU가 **얼마나 빨리** 가져오는지를 다룬다.
+[앞 글](/posts/cs/architecture/number-representation-memory-layout/)에서는 숫자와 구조체가 메모리에 어떤 바이트로 놓이는지 봤다. 이번 글은 그 바이트를 CPU가 **얼마나 빨리** 가져오는지를 다룬다.
 
 이 글이 답하는 질문은 두 가지다.
 
@@ -182,7 +182,7 @@ Drepper는 Linux에서 `getconf LEVEL1_DCACHE_LINESIZE`로 값을 얻어 컴파�
 라인 단위로 움직인다는 사실은 두 가지 부작용을 낳는다.
 
 - **낭비:** 8바이트만 쓰고 버리는 접근 패턴은 대역폭의 8분의 7을 버린다. 2절의 열 우선 순회가 그 예다.
-- **공유:** 서로 다른 스레드가 쓰는 변수가 같은 라인에 있으면, 코어끼리 그 라인을 계속 주고받는다. 이것이 false sharing이고, [캐시 일관성 글](/posts/cs/architecture/cache-coherence-mesi-false-sharing)에서 자세히 다룬다.
+- **공유:** 서로 다른 스레드가 쓰는 변수가 같은 라인에 있으면, 코어끼리 그 라인을 계속 주고받는다. 이것이 false sharing이고, [캐시 일관성 글](/posts/cs/architecture/cache-coherence-mesi-false-sharing/)에서 자세히 다룬다.
 
 여기까지는 "무엇을 가져오는가"였다. 이제 가져온 라인을 캐시의 "어디에 넣는가"를 보자.
 
@@ -370,7 +370,7 @@ cache (32KB, 8-way, 64B line, PIPT)
 | VIPT (virtually indexed, physically tagged) | 가상 | 물리 | set 선택과 주소 변환을 동시에 시작한다. 주로 L1에서 쓴다 |
 | VIVT (virtually indexed, virtually tagged) | 가상 | 가상 | 변환이 필요 없어 가장 빠르다. 하지만 프로세스마다 같은 가상 주소가 다른 데이터를 가리키는 문제(homonym)와 한 물리 주소에 가상 주소가 여럿인 문제(synonym)를 따로 처리해야 해서 요즘은 드물다 |
 
-L1은 모든 로드와 스토어가 지나가는 곳이라 지연 하나가 아쉽다. PIPT는 TLB 조회(변환)가 끝나기를 기다려야 set을 고를 수 있으니 그만큼 늦다. VIPT는 가상 주소로 set을 먼저 고르고, 그동안 TLB가 물리 주소로 변환한다. 변환이 끝나면 그 물리 tag로 set 안의 way들을 비교한다. TLB는 [가상 메모리 글](/posts/cs/os/virtual-memory-page-table-tlb)에서 다룬 주소 변환 캐시다.
+L1은 모든 로드와 스토어가 지나가는 곳이라 지연 하나가 아쉽다. PIPT는 TLB 조회(변환)가 끝나기를 기다려야 set을 고를 수 있으니 그만큼 늦다. VIPT는 가상 주소로 set을 먼저 고르고, 그동안 TLB가 물리 주소로 변환한다. 변환이 끝나면 그 물리 tag로 set 안의 way들을 비교한다. TLB는 [가상 메모리 글](/posts/cs/os/virtual-memory-page-table-tlb/)에서 다룬 주소 변환 캐시다.
 
 ### 왜 32KB L1은 흔히 8-way인가
 
@@ -485,7 +485,7 @@ Igor Ostrovsky의 실험(예제 5)은 이 현상을 그림으로 보여준다. �
 - index는 주소의 중간 비트다. 그래서 stride가 "set 수 × 라인 크기"의 배수면 index가 변하지 않아 한 set에 몰린다. 캐시가 비어 있어도 충돌 미스가 터진다.
 - 대응은 패딩으로 stride를 2의 거듭제곱에서 비틀거나, 블로킹으로 한 번에 건드리는 라인 수를 줄이는 것이다.
 
-다음 글에서는 코어가 여러 개일 때 같은 라인의 사본이 여러 캐시에 생기는 문제를 본다. [캐시 일관성: MESI와 false sharing](/posts/cs/architecture/cache-coherence-mesi-false-sharing)으로 이어진다.
+다음 글에서는 코어가 여러 개일 때 같은 라인의 사본이 여러 캐시에 생기는 문제를 본다. [캐시 일관성: MESI와 false sharing](/posts/cs/architecture/cache-coherence-mesi-false-sharing/)으로 이어진다.
 
 ---
 

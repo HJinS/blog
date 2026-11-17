@@ -13,7 +13,7 @@ description: 48비트 주소 하나를 직접 쪼개 보면서 멀티레벨 페�
 
 ## 개요
 
-[앞 글](/posts/cs/os/deadlock-priority-inversion)까지는 프로세스와 동기화를 다뤘다. 이번 글부터는 메모리로 넘어간다. 첫 주제는 모든 메모리 접근 밑에 깔려 있는 가상 메모리다.
+[앞 글](/posts/cs/os/deadlock-priority-inversion/)까지는 프로세스와 동기화를 다뤘다. 이번 글부터는 메모리로 넘어간다. 첫 주제는 모든 메모리 접근 밑에 깔려 있는 가상 메모리다.
 
 이 글이 답하는 질문은 두 가지다.
 
@@ -211,7 +211,7 @@ TLB는 작다. 그래서 "TLB가 한꺼번에 기억할 수 있는 메모리 크
 
 **컨텍스트 스위치.** TLB 엔트리는 "지금 CR3가 가리키는 주소 공간"의 번역이다. 다른 프로세스로 바꾸면 이전 번역은 틀린 값이 된다. 태그가 없으면 TLB를 비워야 하고, 전환 직후 한동안 미스가 몰린다.
 
-이를 줄이는 장치가 **PCID**(Process-Context Identifier)다. TLB 엔트리마다 주소 공간 번호를 붙여서, 현재 번호와 맞는 엔트리만 쓰게 한다. 그러면 전환할 때 TLB를 통째로 비우지 않아도 된다. 같은 프로세스의 스레드끼리 전환할 때는 주소 공간이 같아서 이 비용이 아예 없다. 스레드 전환이 프로세스 전환보다 싼 이유 중 하나다. 자세한 비교는 [프로세스 vs 스레드 글](/posts/cs/os/process-vs-thread-context-switching)에 있다.
+이를 줄이는 장치가 **PCID**(Process-Context Identifier)다. TLB 엔트리마다 주소 공간 번호를 붙여서, 현재 번호와 맞는 엔트리만 쓰게 한다. 그러면 전환할 때 TLB를 통째로 비우지 않아도 된다. 같은 프로세스의 스레드끼리 전환할 때는 주소 공간이 같아서 이 비용이 아예 없다. 스레드 전환이 프로세스 전환보다 싼 이유 중 하나다. 자세한 비교는 [프로세스 vs 스레드 글](/posts/cs/os/process-vs-thread-context-switching/)에 있다.
 
 **TLB shootdown.** 멀티코어에서는 같은 프로세스의 스레드가 여러 코어에서 돈다. 한 코어가 `munmap`이나 `mprotect`로 매핑을 바꾸면 다른 코어 TLB에 남은 옛 번역도 지워야 한다. 커널은 해당 코어들에 IPI(inter-processor interrupt, 코어 간 인터럽트)를 보내고 처리가 끝나기를 기다린다. 대상 코어가 많을수록 기다리는 시간이 길어진다. 스레드가 많은 프로세스가 매핑을 자주 바꾸면 코어를 늘려도 성능이 덜 오르는 이유다. 메모리 풀을 재사용해 `munmap` 횟수를 줄이는 것이 흔한 완화책이다.
 
@@ -257,7 +257,7 @@ TLB는 작다. 그래서 "TLB가 한꺼번에 기억할 수 있는 메모리 크
 | major | 스왑으로 내보낸 페이지에 다시 접근 | 스왑 영역에서 읽어 옴 | 디스크 I/O를 기다림 |
 | 오류 | 허용되지 않은 주소나 권한 위반 | 프로세스에 `SIGSEGV` 전달 | 프로세스 종료가 보통 |
 
-Copy-on-Write 폴트는 [fork와 Copy-on-Write 글](/posts/cs/os/fork-copy-on-write)에서 Redis 예시로 자세히 다룬다.
+Copy-on-Write 폴트는 [fork와 Copy-on-Write 글](/posts/cs/os/fork-copy-on-write/)에서 Redis 예시로 자세히 다룬다.
 
 둘의 차이는 "기다림의 종류"다. minor fault는 CPU가 일하는 시간이고, major fault는 디스크를 기다리는 시간이다. 그래서 major fault가 보이면 지연 시간이 크게 튈 수 있다.
 
@@ -282,7 +282,7 @@ perf stat -e page-faults,minor-faults,major-faults -- ./my-app
 
 **첫 접근 지연.** demand paging은 비용을 없애는 것이 아니라 첫 접근 시점으로 미룬다. 지연에 민감한 서버라면 요청을 처리하는 도중에 폴트가 몰릴 수 있다. 그래서 시작할 때 미리 건드려 두는 방법을 쓴다. `mmap`의 `MAP_POPULATE` 플래그나 JVM의 `-XX:+AlwaysPreTouch` 옵션이 그런 예다.
 
-**major fault 폭증.** RAM이 모자라면 커널은 어떤 페이지를 내보낼지 골라야 한다. 잘못 고르면 곧 다시 쓸 페이지를 내보내고, 바로 major fault로 다시 읽어 온다. 어떤 페이지를 내보낼지 정하는 방법은 [페이지 교체 알고리즘 글](/posts/cs/os/page-replacement-algorithms)에서 다룬다.
+**major fault 폭증.** RAM이 모자라면 커널은 어떤 페이지를 내보낼지 골라야 한다. 잘못 고르면 곧 다시 쓸 페이지를 내보내고, 바로 major fault로 다시 읽어 온다. 어떤 페이지를 내보낼지 정하는 방법은 [페이지 교체 알고리즘 글](/posts/cs/os/page-replacement-algorithms/)에서 다룬다.
 
 ---
 
@@ -292,7 +292,7 @@ perf stat -e page-faults,minor-faults,major-faults -- ./my-app
 
 Linux는 원래 모든 프로세스의 주소 공간 위쪽에 커널 메모리를 함께 매핑해 두었다. 커널 페이지의 엔트리는 "사용자 모드 접근 금지" 플래그로 막혀 있다. 이렇게 하면 시스템 콜(syscall)로 커널에 들어갈 때 CR3를 바꿀 필요가 없어서 빠르다.
 
-2018년 1월에 공개된 **Meltdown**(CVE-2017-5754)은 이 전제를 깼다. CPU는 권한 검사 결과가 나오기 전에 다음 명령을 미리 실행한다. 이것을 추측 실행(speculative execution)이라고 한다. 미리 실행한 결과는 나중에 버려지지만, 그동안 건드린 캐시 상태는 남는다. 공격자는 이 흔적을 시간 측정으로 읽어 커널 메모리 내용을 알아낸다. 추측 실행 자체는 [파이프라인과 분기 예측 글](/posts/cs/architecture/pipeline-branch-prediction-spectre)에서 다룬다.
+2018년 1월에 공개된 **Meltdown**(CVE-2017-5754)은 이 전제를 깼다. CPU는 권한 검사 결과가 나오기 전에 다음 명령을 미리 실행한다. 이것을 추측 실행(speculative execution)이라고 한다. 미리 실행한 결과는 나중에 버려지지만, 그동안 건드린 캐시 상태는 남는다. 공격자는 이 흔적을 시간 측정으로 읽어 커널 메모리 내용을 알아낸다. 추측 실행 자체는 [파이프라인과 분기 예측 글](/posts/cs/architecture/pipeline-branch-prediction-spectre/)에서 다룬다.
 
 플래그로 막아도 매핑이 있는 한 새는 것이다. 그렇다면 매핑 자체를 없애야 한다.
 
@@ -441,7 +441,7 @@ THP 모드는 `/sys/kernel/mm/transparent_hugepage/enabled`에서 고른다. 값
 - KPTI는 커널 진입과 복귀마다 CR3를 바꾸는 비용을 낸다. syscall이 잦을수록, PCID가 없을수록 비싸다.
 - huge page는 TLB 엔트리 하나가 덮는 범위를 512배 넓힌다. 대신 메모리 낭비와 compaction 지연을 감수해야 한다.
 
-[다음 글](/posts/cs/os/fork-copy-on-write)에서는 이 페이지 테이블과 페이지 폴트를 이용해 `fork()`가 메모리를 복사하지 않고도 자식 프로세스를 만드는 Copy-on-Write를 본다.
+[다음 글](/posts/cs/os/fork-copy-on-write/)에서는 이 페이지 테이블과 페이지 폴트를 이용해 `fork()`가 메모리를 복사하지 않고도 자식 프로세스를 만드는 Copy-on-Write를 본다.
 
 ## 출처
 

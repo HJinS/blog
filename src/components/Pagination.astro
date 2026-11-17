@@ -13,6 +13,14 @@ type Props = {
 const { page } = Astro.props;
 
 const t = useTranslations(Astro.currentLocale);
+
+const ensureTrailingSlash = (url?: string) => {
+  if (!url) return "";
+  return url.endsWith("/") ? url : `${url}/`;
+};
+
+const prevUrl = ensureTrailingSlash(page.url.prev);
+const nextUrl = ensureTrailingSlash(page.url.next);
 ---
 
 {
@@ -24,7 +32,7 @@ const t = useTranslations(Astro.currentLocale);
     >
       <LinkButton
         disabled={!page.url.prev}
-        href={page.url.prev as string}
+        href={prevUrl}
         class:list={["select-none", { "opacity-50": !page.url.prev }]}
         aria-label={t.a11y.goToPreviousPage}
       >
@@ -34,7 +42,7 @@ const t = useTranslations(Astro.currentLocale);
       {page.currentPage} / {page.lastPage}
       <LinkButton
         disabled={!page.url.next}
-        href={page.url.next as string}
+        href={nextUrl}
         class:list={["select-none", { "opacity-50": !page.url.next }]}
         aria-label={t.a11y.goToNextPage}
       >

@@ -13,7 +13,7 @@ description: 행을 덮어쓰지 않고 버전으로 쌓는 MVCC가 읽기와 �
 
 ## 개요
 
-[앞선 글](/posts/cs/database/isolation-levels-anomalies)에서 격리 수준마다 막아 주는 이상 현상이 다르다는 것을 봤다. 이번 글은 그 격리 수준을 실제 DB가 어떻게 구현하는지를 다룬다.
+[앞선 글](/posts/cs/database/isolation-levels-anomalies/)에서 격리 수준마다 막아 주는 이상 현상이 다르다는 것을 봤다. 이번 글은 그 격리 수준을 실제 DB가 어떻게 구현하는지를 다룬다.
 
 - 읽기와 쓰기가 서로를 기다리지 않게 하려면 어떻게 해야 할까?
 - 그렇게 만든 Snapshot Isolation은 왜 완벽하지 않을까?
@@ -80,7 +80,7 @@ MySQL InnoDB는 방식이 조금 다르다. 최신 버전을 테이블에 두고
 
 스냅샷을 트랜잭션 시작 시점에 한 번 고정하면 **Snapshot Isolation**(SI, 스냅샷 격리)이 된다. 트랜잭션 내내 같은 세상을 본다.
 
-이 격리 수준은 [이상 현상 글](/posts/cs/database/isolation-levels-anomalies)에서 정의한 것 중 다음을 막는다.
+이 격리 수준은 [이상 현상 글](/posts/cs/database/isolation-levels-anomalies/)에서 정의한 것 중 다음을 막는다.
 
 - dirty read: 커밋되지 않은 버전은 스냅샷에 안 보인다.
 - non-repeatable read: 같은 스냅샷을 계속 읽으니 값이 바뀌지 않는다.
@@ -155,7 +155,7 @@ SELECT id FROM doctors WHERE on_call = true FOR UPDATE;  -- Alice, Bob 행을 �
 
 두 트랜잭션이 같은 행을 잠그려 하므로 한쪽이 기다린다. MySQL 기본값이나 PostgreSQL READ COMMITTED라면, 기다린 쪽은 상대가 커밋한 최신 상태(1명)를 보고 빠지지 않는다. PostgreSQL REPEATABLE READ라면 기다린 쪽이 직렬화 에러를 받고 재시도한다.
 
-Serializable이 만능은 아니다. SSI는 실제로는 문제없는 경우에도 보수적으로 실패시킬 수 있다(거짓 양성). 앱은 트랜잭션을 통째로 재시도해야 한다. 재시도할 때 메일 발송이나 외부 API 호출이 중복되지 않도록 멱등성도 챙겨야 한다. 이 내용은 [다음 글](/posts/cs/database/serializability-2pl-ssi)에서 자세히 다룬다.
+Serializable이 만능은 아니다. SSI는 실제로는 문제없는 경우에도 보수적으로 실패시킬 수 있다(거짓 양성). 앱은 트랜잭션을 통째로 재시도해야 한다. 재시도할 때 메일 발송이나 외부 API 호출이 중복되지 않도록 멱등성도 챙겨야 한다. 이 내용은 [다음 글](/posts/cs/database/serializability-2pl-ssi/)에서 자세히 다룬다.
 
 ## 7. 오래된 버전의 청소 비용
 
@@ -173,7 +173,7 @@ autovacuum이 돌아도 테이블이 줄지 않는다면 먼저 `pg_stat_activit
 
 ## 8. 같은 이름, 다른 동작
 
-격리 수준 이름은 DB마다 의미가 다르다. PostgreSQL과 MySQL의 REPEATABLE READ 차이는 [격리 수준 글](/posts/cs/database/isolation-levels-anomalies) 5절에서 봤다. 요약하면 이렇다.
+격리 수준 이름은 DB마다 의미가 다르다. PostgreSQL과 MySQL의 REPEATABLE READ 차이는 [격리 수준 글](/posts/cs/database/isolation-levels-anomalies/) 5절에서 봤다. 요약하면 이렇다.
 
 | DB와 격리 수준 | 실제 동작 |
 | --- | --- |
@@ -194,7 +194,7 @@ Oracle 문서가 설명하는 SERIALIZABLE은 이 글의 SI와 같은 규칙이�
 - 충돌 감지가 "같은 행에 대한 쓰기"에만 걸려 있어서, 읽은 조건에 의존해 다른 행을 쓰는 write skew는 막지 못한다. 당직 의사가 둘 다 빠지는 경우가 전형적이다.
 - 막으려면 `FOR UPDATE`, 제약 조건, 공통 행 갱신, 또는 Serializable과 재시도를 쓴다.
 
-Serializable을 켜면 DB가 이 문제를 자동으로 잡아 주는데, 어떻게 가능한지는 [다음 글](/posts/cs/database/serializability-2pl-ssi)에서 SSI를 통해 살펴본다.
+Serializable을 켜면 DB가 이 문제를 자동으로 잡아 주는데, 어떻게 가능한지는 [다음 글](/posts/cs/database/serializability-2pl-ssi/)에서 SSI를 통해 살펴본다.
 
 ## 출처
 

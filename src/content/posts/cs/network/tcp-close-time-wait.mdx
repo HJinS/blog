@@ -13,7 +13,7 @@ description: TCP가 연결을 네 단계로 닫는 이유와 종료 상태 전�
 
 ## 개요
 
-[TCP 연결 수립 글](/posts/cs/network/tcp-handshake-syn-accept-queue)에서는 3-way handshake로 연결을 여는 과정을 봤다. [앞 글](/posts/cs/network/mtu-mss-pmtud)까지는 열린 연결 위에서 데이터가 어떻게 오가는지를 다뤘다. 이번 글은 연결을 닫는 과정이다.
+[TCP 연결 수립 글](/posts/cs/network/tcp-handshake-syn-accept-queue/)에서는 3-way handshake로 연결을 여는 과정을 봤다. [앞 글](/posts/cs/network/mtu-mss-pmtud/)까지는 열린 연결 위에서 데이터가 어떻게 오가는지를 다뤘다. 이번 글은 연결을 닫는 과정이다.
 
 연결을 여는 쪽보다 닫는 쪽에서 장애가 더 자주 난다. 서버에서 `ss`를 쳐 보면 `TIME-WAIT`이나 `CLOSE-WAIT` 상태의 소켓이 수만 개 보일 때가 있다. 둘 다 "닫히는 중"인 소켓이지만 원인과 대응은 정반대다.
 
@@ -246,7 +246,7 @@ sysctl net.ipv4.ip_local_port_range
 | 1 | 모든 트래픽에 켠다 |
 | 2 | 루프백(loopback) 트래픽에만 켠다 (기본값) |
 
-이 설정은 3장의 두 위험을 무시하는 게 아니다. TCP **타임스탬프 옵션**(RFC 7323)으로 위험을 대신 막는다. 타임스탬프 옵션은 세그먼트마다 보낸 시각 값을 붙이는 기능이다([TCP 신뢰성 글](/posts/cs/network/tcp-reliability-retransmission)에서 RTT 측정 용도로 처음 나왔다). 수신 쪽은 이 값이 직전보다 오래된 세그먼트를 버린다. 이 검사를 **PAWS**(Protection Against Wrapped Sequence numbers)라고 한다. 오래된 중복은 타임스탬프가 옛날 값이라서 PAWS에 걸려 버려진다.
+이 설정은 3장의 두 위험을 무시하는 게 아니다. TCP **타임스탬프 옵션**(RFC 7323)으로 위험을 대신 막는다. 타임스탬프 옵션은 세그먼트마다 보낸 시각 값을 붙이는 기능이다([TCP 신뢰성 글](/posts/cs/network/tcp-reliability-retransmission/)에서 RTT 측정 용도로 처음 나왔다). 수신 쪽은 이 값이 직전보다 오래된 세그먼트를 버린다. 이 검사를 **PAWS**(Protection Against Wrapped Sequence numbers)라고 한다. 오래된 중복은 타임스탬프가 옛날 값이라서 PAWS에 걸려 버려진다.
 
 그래서 커널 코드를 보면 재사용 조건이 이렇다.
 
@@ -379,7 +379,7 @@ TCP keepalive와 헷갈리지 않도록 주의한다. **TCP keepalive**(`SO_KEEP
 - **풀 크기에 상한을 둔다.** 풀이 커지면 서버 쪽 동시 연결 수가 늘어난다. 서버의 연결 한도와 함께 정한다.
 - **부하 분산이 치우칠 수 있다.** 연결을 오래 재사용하면 L4 로드밸런서는 연결이 처음 붙은 백엔드로 계속 보낸다. 새 백엔드를 추가해도 트래픽이 바로 옮겨 가지 않는다. 연결 최대 수명을 두어 주기적으로 교체하는 방법을 쓴다.
 
-HTTP/2는 연결 하나에 여러 요청을 동시에 실어 보내서 필요한 연결 수를 더 줄인다. 다만 TCP 위에서 돌기 때문에 패킷 하나가 유실되면 그 연결의 모든 요청이 함께 멈춘다. HTTP/3는 TCP 대신 UDP 위의 QUIC로 이 문제를 푼다. 이 내용은 [HTTP/2 vs HTTP/3(QUIC) 글](/posts/cs/network/http2-vs-http3-quic)에서 다룬다.
+HTTP/2는 연결 하나에 여러 요청을 동시에 실어 보내서 필요한 연결 수를 더 줄인다. 다만 TCP 위에서 돌기 때문에 패킷 하나가 유실되면 그 연결의 모든 요청이 함께 멈춘다. HTTP/3는 TCP 대신 UDP 위의 QUIC로 이 문제를 푼다. 이 내용은 [HTTP/2 vs HTTP/3(QUIC) 글](/posts/cs/network/http2-vs-http3-quic/)에서 다룬다.
 
 ---
 
@@ -390,7 +390,7 @@ HTTP/2는 연결 하나에 여러 요청을 동시에 실어 보내서 필요한
 - TIME_WAIT이 문제가 되는 곳은 대개 같은 목적지로 짧은 연결을 많이 여는 클라이언트다. 임시 포트 28,232개를 60초씩 묶으면 초당 약 470개가 한계다. 연결 재사용이 근본 해법이고, `tcp_tw_reuse`는 타임스탬프를 전제로 한 보조 수단이다. `tcp_tw_recycle`은 Linux 4.12에서 제거됐다.
 - CLOSE_WAIT은 시간 제한이 없고 애플리케이션의 `close()`로만 빠져나온다. 계속 늘어나면 커널이 아니라 코드의 close 누락을 찾는다.
 
-다음 글에서는 이렇게 맺고 끊는 TCP 연결 위에 암호화 계층을 얹는 [TLS 1.3 핸드셰이크](/posts/cs/network/tls13-handshake)를 다룬다.
+다음 글에서는 이렇게 맺고 끊는 TCP 연결 위에 암호화 계층을 얹는 [TLS 1.3 핸드셰이크](/posts/cs/network/tls13-handshake/)를 다룬다.
 
 ---
 

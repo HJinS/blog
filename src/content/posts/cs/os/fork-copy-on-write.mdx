@@ -21,7 +21,7 @@ Redis에 쓰기 트래픽이 많은 상태에서 BGSAVE가 돌면 서버 메모�
 - `fork()`는 24GB짜리 프로세스를 어떻게 순식간에(그러나 완전히 공짜는 아니게) 복제하는가
 - 복제된 뒤에는 어떤 규칙으로 메모리가 늘어나고, 얼마나 늘어나는가
 
-주소 변환과 페이지 테이블이 낯설다면 [가상 메모리, 페이지 테이블, TLB](/posts/cs/os/virtual-memory-page-table-tlb)를 먼저 읽으면 좋다. Redis에서 "어떤 값을 어디에 저장할까"를 정하는 이야기는 [Redis vs RDB](/posts/dev/cache/redis-vs-rdb-loss-risk)에서 다뤘고, 이 글은 그 아래층인 OS가 스냅샷을 어떻게 만드는지에 집중한다.
+주소 변환과 페이지 테이블이 낯설다면 [가상 메모리, 페이지 테이블, TLB](/posts/cs/os/virtual-memory-page-table-tlb/)를 먼저 읽으면 좋다. Redis에서 "어떤 값을 어디에 저장할까"를 정하는 이야기는 [Redis vs RDB](/posts/dev/cache/redis-vs-rdb-loss-risk/)에서 다뤘고, 이 글은 그 아래층인 OS가 스냅샷을 어떻게 만드는지에 집중한다.
 
 ---
 
@@ -44,7 +44,7 @@ Redis가 RDB 파일을 만들려면 "어느 한 시점의 전체 데이터"를 �
 
 ## 2. fork()가 실제로 하는 일
 
-`fork()`(프로세스를 복제하는 시스템 콜)는 자식 프로세스를 만들 때 **데이터 페이지가 아니라 페이지 테이블만 복사한다.** 페이지 테이블은 [앞 글](/posts/cs/os/virtual-memory-page-table-tlb)에서 본, 가상 주소를 물리 페이지에 대응시키는 표다. Linux man page도 fork의 비용을 "부모의 페이지 테이블을 복제하는 시간과 메모리"라고 설명한다.
+`fork()`(프로세스를 복제하는 시스템 콜)는 자식 프로세스를 만들 때 **데이터 페이지가 아니라 페이지 테이블만 복사한다.** 페이지 테이블은 [앞 글](/posts/cs/os/virtual-memory-page-table-tlb/)에서 본, 가상 주소를 물리 페이지에 대응시키는 표다. Linux man page도 fork의 비용을 "부모의 페이지 테이블을 복제하는 시간과 메모리"라고 설명한다.
 
 Redis 문서의 계산을 따라가 보자. 4KB 페이지를 쓰는 24GB 프로세스에서 페이지 테이블의 크기는 이렇다.
 
@@ -163,7 +163,7 @@ COW의 복사 단위가 4KB에서 2MB로 커진다. 쓰기 한 번에 2MB를 복
 
 두 가지 방향으로 터진다.
 
-**메모리가 모자라서 죽는다.** `maxmemory`를 물리 메모리 한계에 가깝게 잡으면, BGSAVE 중 COW로 늘어난 메모리가 한계를 넘어 OOM Killer(메모리가 바닥났을 때 커널이 프로세스를 골라 죽이는 장치)가 Redis를 죽일 수 있다. OOM Killer가 누구를 고르는지는 [overcommit과 OOM Killer 글](/posts/cs/os/overcommit-thrashing-oom-killer)에서 다룬다. Redis 문서의 조언은 `maxmemory`를 데이터뿐 아니라 오버헤드와 단편화까지 고려해 정하라는 것이다. 예를 들어 여유가 10GB라고 보이면 8~9GB로 잡는다. 쓰기가 많다면 COW 여유분도 따로 남겨야 한다.
+**메모리가 모자라서 죽는다.** `maxmemory`를 물리 메모리 한계에 가깝게 잡으면, BGSAVE 중 COW로 늘어난 메모리가 한계를 넘어 OOM Killer(메모리가 바닥났을 때 커널이 프로세스를 골라 죽이는 장치)가 Redis를 죽일 수 있다. OOM Killer가 누구를 고르는지는 [overcommit과 OOM Killer 글](/posts/cs/os/overcommit-thrashing-oom-killer/)에서 다룬다. Redis 문서의 조언은 `maxmemory`를 데이터뿐 아니라 오버헤드와 단편화까지 고려해 정하라는 것이다. 예를 들어 여유가 10GB라고 보이면 8~9GB로 잡는다. 쓰기가 많다면 COW 여유분도 따로 남겨야 한다.
 
 **fork 자체가 실패한다.** `vm.overcommit_memory`가 기본값 0이면 커널은 "새 프로세스가 같은 크기의 메모리를 더 쓸 수도 있다"고 보고, 남은 메모리가 부족해 보이면 fork를 거부할 수 있다. 그러면 BGSAVE가 실패한다. 실제로는 COW 때문에 그만큼 쓰지 않을 텐데도 그렇다. Redis 문서는 `vm.overcommit_memory = 1`로 설정하라고 권한다.
 
@@ -195,7 +195,7 @@ BGSAVE 때 응답이 느려지고 메모리가 급증한다면, 원인은 fork �
 - replica에서 스냅샷을 수행해 primary는 fork 영향을 받지 않게 한다.
 - `maxmemory`에 COW 여유를 반영하고 `vm.overcommit_memory`를 1로 둔다.
 
-운영 관점에서 이 이야기는 [Redis vs RDB](/posts/dev/cache/redis-vs-rdb-loss-risk)의 판단과 이어진다. 그 글은 "유실돼도 괜찮은 값은 Redis에 둔다"는 기준이었다. 그런데 RDB 스냅샷에 의존한다면 복구 지점이 마지막 스냅샷이고, 그 스냅샷을 만드는 비용이 이 글의 fork와 COW다. 저장소를 고를 때는 유실 시 결과뿐 아니라 영속화 방식이 평소 서비스에 내는 비용도 함께 봐야 한다.
+운영 관점에서 이 이야기는 [Redis vs RDB](/posts/dev/cache/redis-vs-rdb-loss-risk/)의 판단과 이어진다. 그 글은 "유실돼도 괜찮은 값은 Redis에 둔다"는 기준이었다. 그런데 RDB 스냅샷에 의존한다면 복구 지점이 마지막 스냅샷이고, 그 스냅샷을 만드는 비용이 이 글의 fork와 COW다. 저장소를 고를 때는 유실 시 결과뿐 아니라 영속화 방식이 평소 서비스에 내는 비용도 함께 봐야 한다.
 
 ---
 
@@ -207,7 +207,7 @@ BGSAVE 때 응답이 느려지고 메모리가 급증한다면, 원인은 fork �
 - 비용은 두 곳에서 나온다. fork 순간의 멈춤(페이지 수에 비례)과 이후 쓰기마다 생기는 COW 폴트와 메모리 증가다.
 - THP는 COW 단위를 2MB로 키워 지연과 메모리 증가를 크게 악화시키므로 Redis에서는 끈다.
 
-COW로 메모리가 늘다 보면 언젠가 RAM이 모자라고, 커널은 어떤 페이지를 내보낼지 골라야 한다. [다음 글](/posts/cs/os/page-replacement-algorithms)에서 그 선택 규칙인 페이지 교체 알고리즘을 본다.
+COW로 메모리가 늘다 보면 언젠가 RAM이 모자라고, 커널은 어떤 페이지를 내보낼지 골라야 한다. [다음 글](/posts/cs/os/page-replacement-algorithms/)에서 그 선택 규칙인 페이지 교체 알고리즘을 본다.
 
 ---
 

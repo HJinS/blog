@@ -13,7 +13,7 @@ description: Raft가 term과 과반 투표로 리더를 하나만 뽑고, 로그
 
 ## 개요
 
-[앞 글](/posts/cs/distributed/consistency-models-quorum)에서는 과반 쿼럼이 왜 읽기와 쓰기를 겹치게 만드는지 봤다. [복제 글](/posts/cs/distributed/replication-cap-pacelc)에서는 리더 하나가 쓰기 순서를 정하는 리더 기반 복제를 봤다. 남은 질문은 "그 리더를 누가, 어떻게 안전하게 바꾸는가"다.
+[앞 글](/posts/cs/distributed/consistency-models-quorum/)에서는 과반 쿼럼이 왜 읽기와 쓰기를 겹치게 만드는지 봤다. [복제 글](/posts/cs/distributed/replication-cap-pacelc/)에서는 리더 하나가 쓰기 순서를 정하는 리더 기반 복제를 봤다. 남은 질문은 "그 리더를 누가, 어떻게 안전하게 바꾸는가"다.
 
 이 글이 답하는 질문은 두 가지다.
 
@@ -293,11 +293,11 @@ votes for S5   :          S3  S4  S5
 
 ### 읽기도 조심해야 한다
 
-쓰기는 안전하지만 읽기는 함정이 있다. 위 그림에서 S1이 `x`를 읽어 달라는 요청을 받아 자기 상태로 바로 답하면 어떻게 될까? 다수 쪽에서 이미 `x`가 바뀌었다면 S1은 오래된 값을 돌려준다. [선형화 가능성](/posts/cs/distributed/consistency-models-quorum)(linearizability)이 깨진다.
+쓰기는 안전하지만 읽기는 함정이 있다. 위 그림에서 S1이 `x`를 읽어 달라는 요청을 받아 자기 상태로 바로 답하면 어떻게 될까? 다수 쪽에서 이미 `x`가 바뀌었다면 S1은 오래된 값을 돌려준다. [선형화 가능성](/posts/cs/distributed/consistency-models-quorum/)(linearizability)이 깨진다.
 
 논문은 두 가지 장치로 이를 막는다. 첫째, 5절의 no-op로 리더가 커밋 위치를 확실히 안다. 둘째, 읽기에 답하기 전에 과반과 heartbeat를 한 번 주고받아 자신이 아직 리더인지 확인한다.
 
-etcd의 Raft 라이브러리는 이 방식(`ReadOnlySafe`)을 기본값으로 쓴다. 리스(lease) 방식은 선택 사항이다. 리스 방식은 리더가 "최근 heartbeat가 성공했으니 한동안은 내가 리더다"라고 가정하고 과반 확인 없이 읽기에 답한다. 빠르지만 시계 오차가 크면 깨질 수 있고, 라이브러리는 이때 CheckQuorum을 반드시 켜라고 요구한다. 리스와 시계의 위험은 [분산 락 글](/posts/cs/distributed/distributed-lock-fencing-token)에서 더 자세히 다룬다.
+etcd의 Raft 라이브러리는 이 방식(`ReadOnlySafe`)을 기본값으로 쓴다. 리스(lease) 방식은 선택 사항이다. 리스 방식은 리더가 "최근 heartbeat가 성공했으니 한동안은 내가 리더다"라고 가정하고 과반 확인 없이 읽기에 답한다. 빠르지만 시계 오차가 크면 깨질 수 있고, 라이브러리는 이때 CheckQuorum을 반드시 켜라고 요구한다. 리스와 시계의 위험은 [분산 락 글](/posts/cs/distributed/distributed-lock-fencing-token/)에서 더 자세히 다룬다.
 
 ### 부분 네트워크 장애: 깔끔하게 둘로 나뉘지 않을 때
 
@@ -360,7 +360,7 @@ Cloudflare 글은 당시 etcd에 이 두 옵션이 켜져 있었는지는 밝히
 
 etcd는 Raft로 복제되는 키-값 저장소다. Kubernetes가 클러스터 상태를 여기에 저장한다. etcd의 Raft 구현은 독립된 라이브러리로도 쓰이며, CockroachDB, TiKV, Docker Swarm 등이 사용한다.
 
-etcd가 과반을 잃으면 리더를 뽑을 수 없으니 쓰기가 멈춘다. Kubernetes 컨트롤 플레인이 상태를 바꾸지 못하게 되는 것이다. 운영에서 자주 보는 증상은 "리더가 자꾸 바뀌고 쓰기 지연이 튄다"이고, 원인은 대개 3절의 타임아웃 문제로 돌아간다. 아래 표의 WAL은 etcd가 Raft 로그를 적는 선행 기록 로그(write-ahead log)다. 변경을 적용하기 전에 먼저 디스크에 남기는 로그로, 자세한 원리는 [WAL 글](/posts/cs/database/wal-aries-crash-recovery)에서 다뤘다.
+etcd가 과반을 잃으면 리더를 뽑을 수 없으니 쓰기가 멈춘다. Kubernetes 컨트롤 플레인이 상태를 바꾸지 못하게 되는 것이다. 운영에서 자주 보는 증상은 "리더가 자꾸 바뀌고 쓰기 지연이 튄다"이고, 원인은 대개 3절의 타임아웃 문제로 돌아간다. 아래 표의 WAL은 etcd가 Raft 로그를 적는 선행 기록 로그(write-ahead log)다. 변경을 적용하기 전에 먼저 디스크에 남기는 로그로, 자세한 원리는 [WAL 글](/posts/cs/database/wal-aries-crash-recovery/)에서 다뤘다.
 
 | 원인 | 확인할 지표 |
 |---|---|
@@ -373,7 +373,7 @@ etcd가 과반을 잃으면 리더를 뽑을 수 없으니 쓰기가 멈춘다. 
 
 ### Kafka KRaft
 
-Kafka는 ZooKeeper 없이 메타데이터를 직접 관리하는 KRaft 모드를 쓴다. 컨트롤러들이 Raft 방식으로 리더를 뽑고 메타데이터 로그 `__cluster_metadata`를 복제한다. 구조와 동작은 [Kafka 아키텍처 글](/posts/dev/messaging/kafka-architecture-fundamentals)의 KRaft 절에서 다뤘다.
+Kafka는 ZooKeeper 없이 메타데이터를 직접 관리하는 KRaft 모드를 쓴다. 컨트롤러들이 Raft 방식으로 리더를 뽑고 메타데이터 로그 `__cluster_metadata`를 복제한다. 구조와 동작은 [Kafka 아키텍처 글](/posts/dev/messaging/kafka-architecture-fundamentals/)의 KRaft 절에서 다뤘다.
 
 한 가지 차이만 짚는다. KRaft의 설계 문서(KIP-595)는 이 프로토콜이 Raft와 달리 풀(pull) 방식이라고 밝힌다. 리더가 `AppendEntries`로 밀어 넣는 대신 팔로워가 Kafka의 Fetch 요청으로 가져간다. term, 과반 투표, 과반 커밋이라는 골격은 이 글에서 본 Raft와 같다.
 
@@ -410,7 +410,7 @@ Orchestrator의 리더 선출은 올바르게 동작했다. "누가 failover를 
 - 깔끔한 파티션보다 부분 장애가 더 까다롭다. PreVote는 고립된 노드가 리더를 흔드는 것을, CheckQuorum은 고립된 리더가 버티는 것을 막는다.
 - 합의는 합의 그룹의 로그만 지킨다. 그 결정에 따라 움직이는 바깥 데이터 계층의 일관성은 따로 설계해야 한다.
 
-다음 글 [2단계 커밋](/posts/cs/distributed/two-phase-commit)에서는 여러 노드가 같은 값에 합의하는 대신 여러 DB의 작업을 모두 반영하거나 모두 취소하는 문제를 다룬다.
+다음 글 [2단계 커밋](/posts/cs/distributed/two-phase-commit/)에서는 여러 노드가 같은 값에 합의하는 대신 여러 DB의 작업을 모두 반영하거나 모두 취소하는 문제를 다룬다.
 
 ---
 

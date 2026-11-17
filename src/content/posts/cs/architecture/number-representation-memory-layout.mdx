@@ -425,7 +425,7 @@ ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(0x11223344); // 44 
 
 ### 왜 정렬이 필요한가
 
-CPU는 메모리를 바이트 하나씩 읽지 않는다. 8바이트 워드나 64바이트 캐시 라인 같은 덩어리로 읽는다. 캐시 라인은 [다음 글](/posts/cs/architecture/memory-hierarchy-cache-mapping)에서 자세히 다룬다.
+CPU는 메모리를 바이트 하나씩 읽지 않는다. 8바이트 워드나 64바이트 캐시 라인 같은 덩어리로 읽는다. 캐시 라인은 [다음 글](/posts/cs/architecture/memory-hierarchy-cache-mapping/)에서 자세히 다룬다.
 
 4바이트 `int`가 주소 0x102에서 시작한다고 하자. 이 값은 0x100~0x103 덩어리와 0x104~0x107 덩어리에 걸친다. CPU는 두 번 읽어서 이어 붙여야 한다. 캐시 라인 경계에 걸치면 캐시 라인 두 개를 건드린다.
 
@@ -533,7 +533,7 @@ Go `sync/atomic` 문서는 ARM, 386, 32비트 MIPS에서 원자적으로 접근�
 
 Java 개발자라면 객체 필드 배치를 직접 정할 일은 거의 없다. Java 언어 명세는 객체 필드의 메모리 배치를 정하지 않고 JVM 구현에 맡긴다. 필드 재배치 기법은 주로 C, C++, Go처럼 선언 순서대로 배치하는 언어에서 쓴다. 다만 정렬과 패딩은 JVM 안에서도 똑같이 일어나므로, 객체가 몇 바이트를 차지하는지 따질 때는 이 원리가 그대로 적용된다.
 
-정렬과 캐시 라인을 혼동하면 안 되는 곳도 있다. 두 스레드가 각자 다른 카운터를 쓰더라도 두 카운터가 같은 캐시 라인에 있으면 성능이 떨어진다. 이것은 정렬 문제가 아니라 false sharing이다. 정렬은 값 하나를 읽는 접근의 정확성과 속도 문제이고, false sharing은 서로 다른 값이 캐시 라인을 공유해서 생기는 문제다. [캐시 일관성과 false sharing](/posts/cs/architecture/cache-coherence-mesi-false-sharing) 글에서 다룬다.
+정렬과 캐시 라인을 혼동하면 안 되는 곳도 있다. 두 스레드가 각자 다른 카운터를 쓰더라도 두 카운터가 같은 캐시 라인에 있으면 성능이 떨어진다. 이것은 정렬 문제가 아니라 false sharing이다. 정렬은 값 하나를 읽는 접근의 정확성과 속도 문제이고, false sharing은 서로 다른 값이 캐시 라인을 공유해서 생기는 문제다. [캐시 일관성과 false sharing](/posts/cs/architecture/cache-coherence-mesi-false-sharing/) 글에서 다룬다.
 
 ---
 
@@ -545,7 +545,7 @@ Java 개발자라면 객체 필드 배치를 직접 정할 일은 거의 없다.
 - 엔디안은 여러 바이트 값의 바이트 순서다. 호스트는 대부분 little-endian이고 네트워크는 big-endian이므로 경계에서 변환한다.
 - 정렬은 값이 메모리 덩어리 경계에 걸치지 않게 하는 규칙이고, 패딩은 그 비용이다. 필드를 정렬 크기 내림차순으로 놓으면 크기가 줄지만, 정확한 규칙은 ABI마다 다르다.
 
-다음 글 [메모리 계층과 캐시 매핑](/posts/cs/architecture/memory-hierarchy-cache-mapping)에서는 이렇게 놓인 바이트를 CPU가 얼마나 빨리 가져오는지, 캐시가 주소를 어떻게 나눠 쓰는지 본다.
+다음 글 [메모리 계층과 캐시 매핑](/posts/cs/architecture/memory-hierarchy-cache-mapping/)에서는 이렇게 놓인 바이트를 CPU가 얼마나 빨리 가져오는지, 캐시가 주소를 어떻게 나눠 쓰는지 본다.
 
 ## 출처
 

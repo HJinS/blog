@@ -14,7 +14,7 @@ description: 이진 힙의 sift-up과 sift-down을 숫자로 따라가 보고, �
 
 ## 개요
 
-[앞 글](/posts/cs/algorithm/probabilistic-data-structures)에서는 정확도를 조금 내주고 메모리를 아끼는 자료구조를 봤다. 이번 글은 "가장 급한 것부터 꺼내기"라는 단순한 요구에서 출발한다.
+[앞 글](/posts/cs/algorithm/probabilistic-data-structures/)에서는 정확도를 조금 내주고 메모리를 아끼는 자료구조를 봤다. 이번 글은 "가장 급한 것부터 꺼내기"라는 단순한 요구에서 출발한다.
 
 이 글이 답하는 질문은 두 가지다.
 
@@ -41,7 +41,7 @@ description: 이진 힙의 sift-up과 sift-down을 숫자로 따라가 보고, �
 
 핵심 아이디어는 한 문장이다. **전체를 정렬하지 않고 "부모가 자식보다 작다"는 느슨한 순서만 지키면, 최소값은 항상 맨 위에 있고 고치는 비용은 트리 높이만큼만 든다.**
 
-이 성질 덕분에 힙은 여러 곳에 쓰인다. [외부 정렬](/posts/cs/algorithm/external-merge-sort)의 k-way 병합은 k개 런의 머리 중 최소값을 힙으로 고르고, [다익스트라](/posts/cs/algorithm/shortest-path-dijkstra-bellman-ford)는 아직 확정하지 않은 정점 중 거리가 가장 짧은 것을 힙으로 꺼낸다.
+이 성질 덕분에 힙은 여러 곳에 쓰인다. [외부 정렬](/posts/cs/algorithm/external-merge-sort/)의 k-way 병합은 k개 런의 머리 중 최소값을 힙으로 고르고, [다익스트라](/posts/cs/algorithm/shortest-path-dijkstra-bellman-ford/)는 아직 확정하지 않은 정점 중 거리가 가장 짧은 것을 힙으로 꺼낸다.
 
 ---
 

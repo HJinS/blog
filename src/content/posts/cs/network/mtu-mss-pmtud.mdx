@@ -21,7 +21,7 @@ description: 패킷 크기 한도인 MTU와 MSS가 어떻게 정해지는지, �
 - MTU와 MSS는 무엇이고, 왜 숫자가 1500과 1460인가?
 - 경로 중간에 더 작은 링크가 있으면 송신자는 그 사실을 어떻게 알고, 그 알림이 막히면 왜 큰 패킷만 사라지는가?
 
-MSS는 TCP handshake 때 SYN의 옵션으로 서로 알리는 값이다. handshake와 옵션 협상의 큰 그림은 [TCP 연결 수립과 SYN/accept queue](/posts/cs/network/tcp-handshake-syn-accept-queue)에서 다뤘다. 이 글은 그중 MSS 값이 어떻게 정해지고 어디서 어긋나는지를 본다.
+MSS는 TCP handshake 때 SYN의 옵션으로 서로 알리는 값이다. handshake와 옵션 협상의 큰 그림은 [TCP 연결 수립과 SYN/accept queue](/posts/cs/network/tcp-handshake-syn-accept-queue/)에서 다뤘다. 이 글은 그중 MSS 값이 어떻게 정해지고 어디서 어긋나는지를 본다.
 
 ---
 
@@ -205,7 +205,7 @@ tcpdump -i eth0 -n 'icmp[0] = 3 and icmp[1] = 4'
 - ICMP가 막히면 handshake와 작은 패킷은 되고 큰 패킷만 영원히 사라진다. 이것이 PMTUD 블랙홀이다.
 - 근본 해결은 필요한 ICMP를 허용하는 것이고, MSS 클램핑은 ICMP 없이도 동작하는 보조 수단이다.
 
-다음 글에서는 연결을 닫는 과정과 TIME_WAIT을 [TCP 연결 종료](/posts/cs/network/tcp-close-time-wait)에서 다룬다.
+다음 글에서는 연결을 닫는 과정과 TIME_WAIT을 [TCP 연결 종료](/posts/cs/network/tcp-close-time-wait/)에서 다룬다.
 
 ---
 

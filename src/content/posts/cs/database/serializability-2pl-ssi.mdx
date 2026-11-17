@@ -13,7 +13,7 @@ description: 직렬 가능성을 선행 그래프로 판별하는 법과, 2PL은
 
 ## 개요
 
-[앞 글](/posts/cs/database/mvcc-snapshot-isolation-write-skew)에서 Snapshot Isolation(SI)이 당직 의사 2명을 동시에 빠지게 두는 것을 봤다. 각 트랜잭션은 규칙을 지켰지만, 합치니 당직이 0명이 됐다. 이것이 write skew다.
+[앞 글](/posts/cs/database/mvcc-snapshot-isolation-write-skew/)에서 Snapshot Isolation(SI)이 당직 의사 2명을 동시에 빠지게 두는 것을 봤다. 각 트랜잭션은 규칙을 지켰지만, 합치니 당직이 0명이 됐다. 이것이 write skew다.
 
 해법은 격리 수준을 SERIALIZABLE로 올리는 것이다. 그런데 이 이름은 정확히 무엇을 약속할까? 그리고 DB는 그 약속을 어떻게 지킬까?
 
@@ -22,7 +22,7 @@ description: 직렬 가능성을 선행 그래프로 판별하는 법과, 2PL은
 - "트랜잭션을 하나씩 실행한 것처럼"이라는 약속은 어떻게 판별하는가?
 - 대표 구현인 2PL과 SSI는 같은 당직 의사 문제를 어떻게 다르게 막는가?
 
-격리 수준과 이상 현상의 정의는 [격리 수준 글](/posts/cs/database/isolation-levels-anomalies)을 참고한다.
+격리 수준과 이상 현상의 정의는 [격리 수준 글](/posts/cs/database/isolation-levels-anomalies/)을 참고한다.
 
 ## 1. 직렬 가능성: 하나씩 실행한 것과 같은 결과
 
@@ -226,7 +226,7 @@ COMMIT -> 당직 1명(Bob)
 
 `count(*)`는 "당직인 의사"라는 **조건**을 읽는다. 그 사이 누군가 당직 의사를 새로 INSERT하면 읽은 결과가 달라진다. 이런 새 행을 막으려면 행뿐 아니라 조건 범위도 잠가야 한다. 이를 **술어 락**(predicate lock)이라 한다.
 
-InnoDB는 인덱스의 행과 그 사이 간격을 함께 잠그는 넥스트 키 락으로 이를 근사한다. 자세한 동작은 [갭 락 글](/posts/cs/database/innodb-gap-next-key-lock)에서 다뤘다.
+InnoDB는 인덱스의 행과 그 사이 간격을 함께 잠그는 넥스트 키 락으로 이를 근사한다. 자세한 동작은 [갭 락 글](/posts/cs/database/innodb-gap-next-key-lock/)에서 다뤘다.
 
 ### 생기는 문제
 

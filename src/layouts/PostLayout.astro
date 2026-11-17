@@ -4,6 +4,7 @@ import config from "@/config";
 
 type Props = {
   title?: string;
+  postTitle?: string;
   description?: string;
   ogImage?: string;
   canonicalURL?: string;
@@ -13,16 +14,33 @@ type Props = {
 
 const { site } = config;
 
-const { title, description, ogImage, canonicalURL, pubDatetime, modDatetime } =
-  Astro.props;
+const {
+  title,
+  postTitle,
+  description,
+  ogImage,
+  canonicalURL = new URL(Astro.url.pathname, Astro.site).href,
+  pubDatetime,
+  modDatetime,
+} = Astro.props;
+
+const effectiveModDatetime = modDatetime ?? pubDatetime;
 
 const structuredData = {
   "@context": "https://schema.org",
   "@type": "BlogPosting",
-  headline: title ?? site.title,
+  headline: postTitle ?? title ?? site.title,
+  ...(description && { description }),
   image: ogImage,
+  url: canonicalURL,
+  mainEntityOfPage: {
+    "@type": "WebPage",
+    "@id": canonicalURL,
+  },
   ...(pubDatetime && { datePublished: pubDatetime.toISOString() }),
-  ...(modDatetime && { dateModified: modDatetime.toISOString() }),
+  ...(effectiveModDatetime && {
+    dateModified: effectiveModDatetime.toISOString(),
+  }),
   author: [
     {
       "@type": "Person",
@@ -33,11 +51,8 @@ const structuredData = {
 };
 ---
 
-<Layout {title} {description} {ogImage} {canonicalURL}>
+<Layout {title} {description} {ogImage} {canonicalURL} ogType="article">
   <Fragment slot="head">
-    <!-- Override og:type for article pages -->
-    <meta property="og:type" content="article" />
-
     {
       pubDatetime && (
         <meta

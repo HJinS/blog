@@ -13,7 +13,7 @@ description: 송신자가 네트워크 상태를 모른 채 cwnd를 키우고 �
 
 ## 개요
 
-[이전 글](/posts/cs/network/tcp-flow-control-nagle-delayed-ack)에서는 수신자의 버퍼가 넘치지 않게 하는 흐름 제어를 봤다. 그런데 수신자가 "얼마든지 받을 수 있다"고 해도 중간의 라우터 큐가 넘치면 패킷은 버려진다.
+[이전 글](/posts/cs/network/tcp-flow-control-nagle-delayed-ack/)에서는 수신자의 버퍼가 넘치지 않게 하는 흐름 제어를 봤다. 그런데 수신자가 "얼마든지 받을 수 있다"고 해도 중간의 라우터 큐가 넘치면 패킷은 버려진다.
 
 이 글은 두 가지를 다룬다.
 
@@ -30,7 +30,7 @@ description: 송신자가 네트워크 상태를 모른 채 cwnd를 키우고 �
 
 핵심 아이디어는 한 문장이다. **송신자가 스스로 혼잡 윈도우(cwnd)를 추정해 두고, 그 이상은 보내지 않는다.**
 
-혼잡 윈도우(congestion window, cwnd)는 송신자가 "지금 네트워크에 이만큼은 띄워도 괜찮겠다"고 혼자 추정한 값이다. 수신자가 알려 주는 rwnd와 함께 쓰여서, 실제로 보낼 수 있는 미확인 데이터는 `min(rwnd, cwnd)`로 제한된다. 이 식과 rwnd는 [이전 글](/posts/cs/network/tcp-flow-control-nagle-delayed-ack)에서 봤다. 이 글은 cwnd를 어떻게 키우고 줄이는지만 다룬다.
+혼잡 윈도우(congestion window, cwnd)는 송신자가 "지금 네트워크에 이만큼은 띄워도 괜찮겠다"고 혼자 추정한 값이다. 수신자가 알려 주는 rwnd와 함께 쓰여서, 실제로 보낼 수 있는 미확인 데이터는 `min(rwnd, cwnd)`로 제한된다. 이 식과 rwnd는 [이전 글](/posts/cs/network/tcp-flow-control-nagle-delayed-ack/)에서 봤다. 이 글은 cwnd를 어떻게 키우고 줄이는지만 다룬다.
 
 문제는 네트워크가 "지금 혼잡해요"라고 알려 주지 않는다는 점이다. 송신자는 손실이나 지연 증가 같은 **간접 신호**로 추정해야 한다. 그리고 모든 송신자가 비슷한 규칙을 따라야 전체가 공정하고 안정적으로 수렴한다.
 

@@ -13,7 +13,7 @@ description: IP가 잃어버리고 뒤섞은 바이트를 TCP가 시퀀스 번�
 
 ## 개요
 
-[앞 글](/posts/cs/network/tcp-handshake-syn-accept-queue)에서는 3-way handshake로 연결을 맺는 과정을 봤다. 연결이 맺어지면 이제 데이터를 보낸다. 그런데 TCP 아래에 있는 IP는 보낸 패킷이 도착한다고 약속하지 않는다.
+[앞 글](/posts/cs/network/tcp-handshake-syn-accept-queue/)에서는 3-way handshake로 연결을 맺는 과정을 봤다. 연결이 맺어지면 이제 데이터를 보낸다. 그런데 TCP 아래에 있는 IP는 보낸 패킷이 도착한다고 약속하지 않는다.
 
 이 글이 답하는 질문은 두 가지다.
 
@@ -252,7 +252,7 @@ RFC 5681은 다음 조건을 모두 만족하는 ACK를 중복 ACK(duplicate ACK
 - ACK 번호가 지금까지 받은 가장 큰 ACK 번호와 같다.
 - 광고한 윈도우 크기가 직전 ACK와 같다.
 
-마지막 조건은 윈도우 크기만 바꾸려고 보낸 ACK를 중복 ACK로 잘못 세지 않기 위한 것이다. 윈도우는 [다음 글](/posts/cs/network/tcp-flow-control-nagle-delayed-ack)에서 다룬다.
+마지막 조건은 윈도우 크기만 바꾸려고 보낸 ACK를 중복 ACK로 잘못 세지 않기 위한 것이다. 윈도우는 [다음 글](/posts/cs/network/tcp-flow-control-nagle-delayed-ack/)에서 다룬다.
 
 ### 세그먼트 5개로 따라가기
 
@@ -299,7 +299,7 @@ S4              ACK 1400
 
 - **손실 뒤에 세그먼트가 3개 이상 있어야 한다.** 응답의 마지막 세그먼트가 사라지면 뒤따라 도착할 세그먼트가 없으니 중복 ACK도 없다. 위 예시에서 S5가 사라졌다면 송신자는 결국 RTO를 기다린다.
 - **한 번에 빈 곳 하나만 보인다.** 중복 ACK가 가리키는 곳은 맨 앞의 빈 곳뿐이다. 빈 곳이 여러 개면 하나를 메운 뒤에야 다음 빈 곳이 ACK 번호로 드러난다.
-- **속도도 줄여야 한다.** 세그먼트가 사라졌다는 것은 경로가 막혔다는 신호이기도 하다. RFC 5681은 빠른 재전송을 보내는 속도를 줄이는 빠른 회복(fast recovery)과 함께 정의한다. 이 부분은 [혼잡 제어 글](/posts/cs/network/tcp-congestion-control)에서 이어진다.
+- **속도도 줄여야 한다.** 세그먼트가 사라졌다는 것은 경로가 막혔다는 신호이기도 하다. RFC 5681은 빠른 재전송을 보내는 속도를 줄이는 빠른 회복(fast recovery)과 함께 정의한다. 이 부분은 [혼잡 제어 글](/posts/cs/network/tcp-congestion-control/)에서 이어진다.
 
 두 번째 문제를 푸는 것이 SACK이다.
 
@@ -407,7 +407,7 @@ TCP의 약속은 "순서대로 빠짐없이"다. 이 약속 때문에 빈 곳 �
 
 어느 경우든 그동안 빈 곳 뒤의 바이트는 애플리케이션에 전달되지 않는다. TCP는 바이트가 어느 요청에 속하는지 모른다. 그래서 세그먼트 하나가 사라지면 그 뒤에 있는 **서로 관계없는 데이터까지** 함께 멈춘다.
 
-이 성질이 가장 크게 드러나는 곳이 HTTP/2다. HTTP/2는 여러 요청의 스트림을 TCP 연결 하나에 섞어 보낸다. 한 스트림의 세그먼트가 사라지면 다른 스트림까지 기다리는 TCP 레벨 HOL Blocking(Head-of-Line Blocking)이 생긴다. 그 과정과 QUIC이 스트림별로 손실을 처리해 이를 피하는 방법은 [HTTP/2 vs HTTP/3(QUIC) 글](/posts/cs/network/http2-vs-http3-quic)에서 다룬다.
+이 성질이 가장 크게 드러나는 곳이 HTTP/2다. HTTP/2는 여러 요청의 스트림을 TCP 연결 하나에 섞어 보낸다. 한 스트림의 세그먼트가 사라지면 다른 스트림까지 기다리는 TCP 레벨 HOL Blocking(Head-of-Line Blocking)이 생긴다. 그 과정과 QUIC이 스트림별로 손실을 처리해 이를 피하는 방법은 [HTTP/2 vs HTTP/3(QUIC) 글](/posts/cs/network/http2-vs-http3-quic/)에서 다룬다.
 
 ---
 

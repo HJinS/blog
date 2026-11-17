@@ -20,7 +20,7 @@ description: TCP 서버가 3-way handshake 도중과 직후에 연결을 어떤 
 - TCP 서버는 3-way handshake 중인 연결과 끝난 연결을 어디에 보관하는가?
 - 그 큐가 가득 차면 클라이언트에게 무슨 일이 생기고, `ss -lnt`로 어떻게 확인하는가?
 
-이 글은 TCP 시리즈의 두 번째 글이다. 연결이 만들어진 뒤 데이터가 유실될 때 어떻게 복구하는지는 [TCP 신뢰성과 재전송](/posts/cs/network/tcp-reliability-retransmission)에서 다룬다.
+이 글은 TCP 시리즈의 두 번째 글이다. 연결이 만들어진 뒤 데이터가 유실될 때 어떻게 복구하는지는 [TCP 신뢰성과 재전송](/posts/cs/network/tcp-reliability-retransmission/)에서 다룬다.
 
 ---
 
@@ -36,9 +36,9 @@ SYN과 SYN+ACK는 연결 설정값도 함께 실어 나른다. TCP 헤더 뒤의
 
 | 옵션 | 뜻 | 자세한 내용 |
 |---|---|---|
-| MSS(Maximum Segment Size) | 세그먼트 하나에 담을 수 있는 데이터의 최대 크기 | [MTU·MSS 글](/posts/cs/network/mtu-mss-pmtud) |
-| 윈도우 스케일(window scale) | 수신 윈도우 값을 몇 배로 해석할지 정하는 배율 | [흐름 제어 글](/posts/cs/network/tcp-flow-control-nagle-delayed-ack) |
-| SACK 허용(SACK-permitted) | 받은 구간을 골라 알리는 SACK을 쓸 수 있다는 표시 | [신뢰성 글](/posts/cs/network/tcp-reliability-retransmission) |
+| MSS(Maximum Segment Size) | 세그먼트 하나에 담을 수 있는 데이터의 최대 크기 | [MTU·MSS 글](/posts/cs/network/mtu-mss-pmtud/) |
+| 윈도우 스케일(window scale) | 수신 윈도우 값을 몇 배로 해석할지 정하는 배율 | [흐름 제어 글](/posts/cs/network/tcp-flow-control-nagle-delayed-ack/) |
+| SACK 허용(SACK-permitted) | 받은 구간을 골라 알리는 SACK을 쓸 수 있다는 표시 | [신뢰성 글](/posts/cs/network/tcp-reliability-retransmission/) |
 
 이 옵션들은 handshake 때만 협상할 수 있다. 7절에서 이 점이 다시 중요해진다.
 

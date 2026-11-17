@@ -14,7 +14,7 @@ description: CFS가 vruntime으로 공정함을 만드는 방식을 짧게 짚�
 
 ## 개요
 
-[앞 글](/posts/cs/os/process-exit-zombie-pid1)에서는 프로세스의 끝과 컨테이너의 PID 1을 봤다. 런큐와 컨텍스트 스위칭 비용은 [프로세스와 스레드 글](/posts/cs/os/process-vs-thread-context-switching)에서 다뤘다. 이번 글은 런큐에서 다음 태스크를 고르는 기준(vruntime)을 짧게 짚고, 그 위에 얹힌 기능인 컨테이너 CPU limit을 다룬다.
+[앞 글](/posts/cs/os/process-exit-zombie-pid1/)에서는 프로세스의 끝과 컨테이너의 PID 1을 봤다. 런큐와 컨텍스트 스위칭 비용은 [프로세스와 스레드 글](/posts/cs/os/process-vs-thread-context-switching/)에서 다뤘다. 이번 글은 런큐에서 다음 태스크를 고르는 기준(vruntime)을 짧게 짚고, 그 위에 얹힌 기능인 컨테이너 CPU limit을 다룬다.
 
 이 글이 답하는 질문은 두 가지다.
 
@@ -168,7 +168,7 @@ Indeed 엔지니어링 블로그는 컨테이너가 CPU를 거의 쓰지 않는�
 - 스레드가 많을수록 quota를 빨리 쓴다. quota 100ms에서 4스레드는 25ms 만에 소진하고 75ms를 기다린다.
 - 확인은 `cpu.stat`의 `nr_throttled`/`nr_periods` 비율과 `throttled_usec` 증가로 한다. 평균 사용률 그래프만 봐서는 보이지 않는다.
 
-[다음 글](/posts/cs/os/mutex-semaphore-spinlock)에서는 같은 CPU 시간을 나눠 쓰는 스레드들이 공유 데이터를 함께 건드릴 때 필요한 락을 본다.
+[다음 글](/posts/cs/os/mutex-semaphore-spinlock/)에서는 같은 CPU 시간을 나눠 쓰는 스레드들이 공유 데이터를 함께 건드릴 때 필요한 락을 본다.
 
 ---
 

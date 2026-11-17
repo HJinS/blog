@@ -14,14 +14,14 @@ description: CAS 한 번으로 락 없이 스택을 갱신하는 방법과, 값�
 
 ## 개요
 
-[앞 글](/posts/cs/architecture/memory-model-barriers)에서는 CPU와 컴파일러가 메모리 연산 순서를 바꾸는 이유와 배리어를 봤다. 이번 글은 그 위에서 만든 도구인 CAS를 다룬다. CAS는 락 없이 공유 자료구조를 갱신하게 해 주는 CPU 명령이다.
+[앞 글](/posts/cs/architecture/memory-model-barriers/)에서는 CPU와 컴파일러가 메모리 연산 순서를 바꾸는 이유와 배리어를 봤다. 이번 글은 그 위에서 만든 도구인 CAS를 다룬다. CAS는 락 없이 공유 자료구조를 갱신하게 해 주는 CPU 명령이다.
 
 이 글이 답하는 질문은 두 가지다.
 
 - 락 없이 스택을 만들 수 있는 이유는 무엇이고, 그 대가는 무엇인가?
 - CAS가 "값이 같다"만 확인해서 생기는 ABA 문제는 무엇이고 어떻게 막는가?
 
-락 자체(뮤텍스, 세마포어, 스핀락)의 기본은 [뮤텍스, 세마포어, 스핀락](/posts/cs/os/mutex-semaphore-spinlock)에서 다뤘으니 여기서는 반복하지 않는다.
+락 자체(뮤텍스, 세마포어, 스핀락)의 기본은 [뮤텍스, 세마포어, 스핀락](/posts/cs/os/mutex-semaphore-spinlock/)에서 다뤘으니 여기서는 반복하지 않는다.
 
 ---
 
@@ -29,7 +29,7 @@ description: CAS 한 번으로 락 없이 스택을 갱신하는 방법과, 값�
 
 공유 스택에 여러 스레드가 push와 pop을 한다고 하자. 가장 쉬운 방법은 뮤텍스로 스택 전체를 감싸는 것이다. 정확성을 검증하기 쉽고 구현도 단순하다.
 
-문제는 락을 쥔 스레드가 멈출 때 생긴다. 락을 쥔 채로 OS에 선점되거나 페이지 폴트로 오래 멈추면, 락을 기다리는 스레드가 전부 같이 멈춘다. 이를 락 보유자 선점(lock holder preemption) 문제라고 부른다. 우선순위가 낮은 스레드가 락을 쥐면 [우선순위 역전](/posts/cs/os/deadlock-priority-inversion)도 생긴다.
+문제는 락을 쥔 스레드가 멈출 때 생긴다. 락을 쥔 채로 OS에 선점되거나 페이지 폴트로 오래 멈추면, 락을 기다리는 스레드가 전부 같이 멈춘다. 이를 락 보유자 선점(lock holder preemption) 문제라고 부른다. 우선순위가 낮은 스레드가 락을 쥐면 [우선순위 역전](/posts/cs/os/deadlock-priority-inversion/)도 생긴다.
 
 그래서 이런 질문이 나온다. "한 스레드가 중간에 멈춰도 다른 스레드는 계속 진행할 수 없을까?" 이 성질을 가진 설계를 lock-free라고 한다. 이 요구를 하드웨어 명령 하나로 풀어 준 것이 CAS다.
 
@@ -136,7 +136,7 @@ CAS는 잘못이 없다. "head가 A 주소이면 바꿔라"를 정확히 수행�
 
 참고로 LL/SC(load-linked/store-conditional)는 값을 비교하지 않고 "읽은 뒤 그 위치에 쓰기가 있었는지"를 추적한다. 그래서 ABA에 강하다. 다만 ARM 같은 구현에서는 다른 이유로도 가끔 실패하는 spurious failure가 있어 재시도 루프가 필수다. 이 내용은 [Wikipedia의 ABA 문서](https://en.wikipedia.org/wiki/ABA_problem)에 정리되어 있다.
 
-hazard pointer를 쓸 때 한 가지 더 알아야 한다. "공개한 뒤 head를 다시 확인한다"는 패턴은 store 뒤에 load가 이어진다. 이 순서는 x86에서도 CPU가 바꿀 수 있다(store buffer 때문이다). [메모리 모델과 배리어](/posts/cs/architecture/memory-model-barriers) 글의 store buffering(SB) 패턴과 같은 모양이다. 그래서 release/acquire 수준으로는 부족하고, seq_cst나 풀 배리어처럼 StoreLoad 순서를 지키는 도구가 필요하다.
+hazard pointer를 쓸 때 한 가지 더 알아야 한다. "공개한 뒤 head를 다시 확인한다"는 패턴은 store 뒤에 load가 이어진다. 이 순서는 x86에서도 CPU가 바꿀 수 있다(store buffer 때문이다). [메모리 모델과 배리어](/posts/cs/architecture/memory-model-barriers/) 글의 store buffering(SB) 패턴과 같은 모양이다. 그래서 release/acquire 수준으로는 부족하고, seq_cst나 풀 배리어처럼 StoreLoad 순서를 지키는 도구가 필요하다.
 
 ---
 
@@ -226,7 +226,7 @@ class StampedStack<T> {
 - 해결은 버전을 붙이거나(태그 포인터, `AtomicStampedReference`), 쓰는 동안 주소를 재사용하지 못하게 하는 것이다(hazard pointer, epoch).
 - GC 언어는 주소 재사용형 ABA를 대부분 없애 주지만, 객체 풀링이나 값 의미의 ABA는 남는다.
 
-다음 글 [링 버퍼와 SPSC 큐](/posts/cs/architecture/ring-buffer-spsc)에서는 쓰는 주체를 하나로 줄여 CAS조차 필요 없게 만드는 구조를 본다.
+다음 글 [링 버퍼와 SPSC 큐](/posts/cs/architecture/ring-buffer-spsc/)에서는 쓰는 주체를 하나로 줄여 CAS조차 필요 없게 만드는 구조를 본다.
 
 ---
 

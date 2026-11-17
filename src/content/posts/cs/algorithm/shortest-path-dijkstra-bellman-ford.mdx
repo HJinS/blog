@@ -13,7 +13,7 @@ description: 음수 간선 하나가 Dijkstra의 확정 규칙을 어떻게 깨�
 
 ## 개요
 
-[힙과 타이밍 휠](/posts/cs/algorithm/heap-timing-wheel) 글에서 우선순위 큐를 봤다. 이번 글은 그 우선순위 큐가 가장 유명하게 쓰이는 곳, 최단 경로를 다룬다. 이어서 위상 정렬을 다룬 [DFS와 위상 정렬](/posts/cs/algorithm/dfs-topological-sort) 글과도 한 군데서 만난다.
+[힙과 타이밍 휠](/posts/cs/algorithm/heap-timing-wheel/) 글에서 우선순위 큐를 봤다. 이번 글은 그 우선순위 큐가 가장 유명하게 쓰이는 곳, 최단 경로를 다룬다. 이어서 위상 정렬을 다룬 [DFS와 위상 정렬](/posts/cs/algorithm/dfs-topological-sort/) 글과도 한 군데서 만난다.
 
 이 글이 답하는 질문은 두 가지다.
 
@@ -158,7 +158,7 @@ Dijkstra의 $O((V+E) \log V)$는 이진 힙 기준이다. 힙에 정점 대신 `
 | Bellman-Ford | $O(V \cdot E)$ | 가능, 음수 사이클 탐지 | 거리 벡터 라우팅, 환율 차익거래 탐지 |
 | Floyd-Warshall | $O(V^3)$ | 가능(음수 사이클 없을 때) | 모든 쌍 최단 경로, 작은 그래프 |
 
-그래프가 방향 비순환 그래프(DAG)라면 더 빠른 길이 있다. [위상 정렬](/posts/cs/algorithm/dfs-topological-sort) 순서대로 정점을 한 번씩 완화하면 음수 간선이 있어도 $O(V+E)$에 끝난다. 의존 관계처럼 사이클이 없다는 사실을 아는 경우 우선 이 방법을 떠올릴 만하다.
+그래프가 방향 비순환 그래프(DAG)라면 더 빠른 길이 있다. [위상 정렬](/posts/cs/algorithm/dfs-topological-sort/) 순서대로 정점을 한 번씩 완화하면 음수 간선이 있어도 $O(V+E)$에 끝난다. 의존 관계처럼 사이클이 없다는 사실을 아는 경우 우선 이 방법을 떠올릴 만하다.
 
 ---
 

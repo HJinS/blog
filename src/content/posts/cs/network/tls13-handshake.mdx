@@ -13,7 +13,7 @@ description: TLS 1.3이 1-RTT 안에 키 교환과 서버 인증을 끝내는 �
 
 ## 개요
 
-[앞 글](/posts/cs/network/tcp-close-time-wait)까지는 TCP가 연결을 맺고, 데이터를 믿을 수 있게 나르고, 연결을 닫는 과정을 봤다. 그런데 TCP는 내용을 숨기지 않는다. 경로 위의 누구든 패킷을 읽고 바꿀 수 있다. 네트워크 시리즈의 마지막 글은 그 위에 얹는 보안 계층인 TLS를 다룬다.
+[앞 글](/posts/cs/network/tcp-close-time-wait/)까지는 TCP가 연결을 맺고, 데이터를 믿을 수 있게 나르고, 연결을 닫는 과정을 봤다. 그런데 TCP는 내용을 숨기지 않는다. 경로 위의 누구든 패킷을 읽고 바꿀 수 있다. 네트워크 시리즈의 마지막 글은 그 위에 얹는 보안 계층인 TLS를 다룬다.
 
 이 글이 답하는 질문은 두 가지다.
 
@@ -64,7 +64,7 @@ TLS는 이 세 문제를 각각 막는다.
 
 ### 비밀에서 키로
 
-공유 비밀이 생기면 바로 암호화 키로 쓰지 않는다. **HKDF**(HMAC-based Key Derivation Function)에 넣어 용도별 키를 여러 개 뽑는다. HKDF는 하나의 비밀에서 서로 독립적인 키를 여러 개 만들어 내는 함수다. 해시와 KDF의 기본 개념은 [비밀번호 저장과 KDF](/posts/cs/security/password-storage-kdf) 글에서 다룬다.
+공유 비밀이 생기면 바로 암호화 키로 쓰지 않는다. **HKDF**(HMAC-based Key Derivation Function)에 넣어 용도별 키를 여러 개 뽑는다. HKDF는 하나의 비밀에서 서로 독립적인 키를 여러 개 만들어 내는 함수다. 해시와 KDF의 기본 개념은 [비밀번호 저장과 KDF](/posts/cs/security/password-storage-kdf/) 글에서 다룬다.
 
 뽑는 키는 크게 두 종류다.
 
@@ -382,7 +382,7 @@ OpenSSL 공지가 권한 대응은 세 가지였다.
 - 정적 RSA 키 교환을 없애고 연결마다 임시 키를 쓰게 해서, 서버 장기 키가 나중에 유출돼도 과거 트래픽은 풀리지 않는다. 0-RTT는 이 성질과 재전송 안전성을 일부 내주고 왕복 하나를 더 줄이므로 멱등 요청에만 쓴다.
 - 인증서 검증 실패는 서버 체인, 클라이언트 신뢰 저장소, 경로 탐색 구현의 조합에서 나온다. 의심되면 `openssl s_client -showcerts`로 서버가 보내는 체인부터 본다.
 
-TCP 위의 TLS 1.3은 TCP 핸드셰이크 1-RTT 뒤에 TLS 1-RTT를 따로 치러야 한다. QUIC은 TLS 1.3 핸드셰이크 메시지를 자기 전송 계층에 직접 실어 이 두 단계를 하나로 합친다. 그 구조와 HOL blocking 문제는 [HTTP/2 vs HTTP/3(QUIC)](/posts/cs/network/http2-vs-http3-quic) 글에서 이어서 볼 수 있다.
+TCP 위의 TLS 1.3은 TCP 핸드셰이크 1-RTT 뒤에 TLS 1-RTT를 따로 치러야 한다. QUIC은 TLS 1.3 핸드셰이크 메시지를 자기 전송 계층에 직접 실어 이 두 단계를 하나로 합친다. 그 구조와 HOL blocking 문제는 [HTTP/2 vs HTTP/3(QUIC)](/posts/cs/network/http2-vs-http3-quic/) 글에서 이어서 볼 수 있다.
 
 ---
 

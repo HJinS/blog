@@ -14,7 +14,7 @@ description: 데이터를 여러 노드에 복사할 때 동기·비동기 복�
 
 ## 개요
 
-[앞 글](/posts/cs/distributed/logical-clocks)에서는 여러 노드가 시계 없이 사건의 순서를 정하는 방법을 봤다. 이번 글은 같은 데이터를 여러 노드에 복사해 두는 복제(replication)를 다룬다.
+[앞 글](/posts/cs/distributed/logical-clocks/)에서는 여러 노드가 시계 없이 사건의 순서를 정하는 방법을 봤다. 이번 글은 같은 데이터를 여러 노드에 복사해 두는 복제(replication)를 다룬다.
 
 이 글이 답하는 질문은 두 가지다.
 
@@ -98,7 +98,7 @@ t=2   follower 1 promoted to leader   -> balance is still old value
       => client saw OK, but the write is gone
 ```
 
-클라이언트는 성공 응답을 받았는데 데이터가 사라졌다. 이런 유실을 감수할지 판단하는 기준은 [Redis vs RDB 글](/posts/dev/cache/redis-vs-rdb-loss-risk)에서 다룬 것과 같다. "이 값이 유실되면 정확히 무슨 일이 생기는가"를 먼저 따진다.
+클라이언트는 성공 응답을 받았는데 데이터가 사라졌다. 이런 유실을 감수할지 판단하는 기준은 [Redis vs RDB 글](/posts/dev/cache/redis-vs-rdb-loss-risk/)에서 다룬 것과 같다. "이 값이 유실되면 정확히 무슨 일이 생기는가"를 먼저 따진다.
 
 ### 그 사이: MySQL 반동기 복제
 
@@ -175,7 +175,7 @@ B는 t1에 댓글 c3을 봤다. t2에 새로고침했더니 로드 밸런서가 
 
 해결책은 한 사용자의 읽기를 항상 같은 레플리카로 보내는 것이다. 사용자 ID 해시로 레플리카를 고르는 식이다. 다만 그 레플리카가 죽으면 다른 곳으로 옮겨야 하고, 그 순간 다시 깨질 수 있다.
 
-두 현상 모두 "레플리카는 결국 같아진다"는 사실과 모순되지 않는다. 결국 같아지는 것과, 같아지기 전까지 사용자에게 무엇이 보이는지는 다른 문제다. 이런 보장들을 일관성 모델로 정리하는 일은 [다음 글](/posts/cs/distributed/consistency-models-quorum)에서 다룬다.
+두 현상 모두 "레플리카는 결국 같아진다"는 사실과 모순되지 않는다. 결국 같아지는 것과, 같아지기 전까지 사용자에게 무엇이 보이는지는 다른 문제다. 이런 보장들을 일관성 모델로 정리하는 일은 [다음 글](/posts/cs/distributed/consistency-models-quorum/)에서 다룬다.
 
 ---
 
@@ -205,7 +205,7 @@ time   leader Seoul                  leader Virginia
 
 충돌을 푸는 방법은 여러 가지다. 타임스탬프가 큰 쪽을 남기는 방법(last-write-wins), 두 값을 모두 남겨 애플리케이션이 합치게 하는 방법, 자동으로 합쳐지는 자료구조를 쓰는 방법이 있다.
 
-Brewer는 Amazon 장바구니를 예로 든다. 분할이 끝나면 양쪽 장바구니의 합집합을 남긴다. 그래서 한쪽에서 지운 상품이 다시 나타날 수 있다. 합치는 방법을 정하면 무엇을 잃는지도 함께 정해진다. 각 방법의 자세한 비교는 [다음 글](/posts/cs/distributed/consistency-models-quorum)에서 이어간다.
+Brewer는 Amazon 장바구니를 예로 든다. 분할이 끝나면 양쪽 장바구니의 합집합을 남긴다. 그래서 한쪽에서 지운 상품이 다시 나타날 수 있다. 합치는 방법을 정하면 무엇을 잃는지도 함께 정해진다. 각 방법의 자세한 비교는 [다음 글](/posts/cs/distributed/consistency-models-quorum/)에서 이어간다.
 
 | 구조 | 쓰기를 받는 곳 | 얻는 것 | 잃는 것 |
 | --- | --- | --- | --- |

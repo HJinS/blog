@@ -14,7 +14,7 @@ description: 이름과 파일이 왜 분리되어 있는지, 그 구조 때문�
 
 ## 개요
 
-[앞 글](/posts/cs/os/memory-allocator-fragmentation)까지는 메모리를 다뤘다. 이번 글부터는 I/O로 넘어가, 먼저 디스크 위의 데이터를 이름으로 찾아가게 해 주는 파일 시스템을 본다.
+[앞 글](/posts/cs/os/memory-allocator-fragmentation/)까지는 메모리를 다뤘다. 이번 글부터는 I/O로 넘어가, 먼저 디스크 위의 데이터를 이름으로 찾아가게 해 주는 파일 시스템을 본다.
 
 서버에서 `df -h`는 사용률이 12%인데 파일을 만들면 `No space left on device`가 나올 때가 있다. 반대로 큰 로그를 `rm`으로 지웠는데 사용률이 그대로인 경우도 있다. 둘 다 파일 시스템이 "이름"과 "파일"을 따로 관리하기 때문에 생긴다.
 
@@ -23,7 +23,7 @@ description: 이름과 파일이 왜 분리되어 있는지, 그 구조 때문�
 - 디렉터리, inode, 데이터 블록은 각각 무엇을 갖고 있고, 하드 링크와 심볼릭 링크는 어떻게 다른가?
 - 저널링(journaling)은 크래시 뒤에 무엇을 보장하고, 무엇은 보장하지 않는가?
 
-저널링이 지켜 주지 않는 "데이터 내구성"은 [페이지 캐시와 fsync](/posts/cs/os/page-cache-fsync) 글에서 이어서 다룬다.
+저널링이 지켜 주지 않는 "데이터 내구성"은 [페이지 캐시와 fsync](/posts/cs/os/page-cache-fsync/) 글에서 이어서 다룬다.
 
 ---
 
@@ -177,7 +177,7 @@ Filesystem      Inodes   IUsed IFree IUse% Mounted on
 
 세 번의 쓰기 중간에 전원이 나가면 어긋난 상태가 남는다. 비트맵은 사용 중인데 가리키는 디렉터리 항목이 없거나(공간 누수), 디렉터리 항목은 있는데 inode는 비어 있을 수 있다. 예전에는 부팅 때 `fsck`가 디스크 전체를 훑어 고쳤고, 디스크가 클수록 오래 걸렸다.
 
-저널링은 이 문제를 데이터베이스의 [WAL](/posts/cs/database/wal-aries-crash-recovery)(Write-Ahead Logging)과 같은 방식으로 푼다.
+저널링은 이 문제를 데이터베이스의 [WAL](/posts/cs/database/wal-aries-crash-recovery/)(Write-Ahead Logging)과 같은 방식으로 푼다.
 
 > 변경 내용을 먼저 순차 로그(저널)에 기록하고, 나중에 제자리에 반영한다.
 
@@ -207,9 +207,9 @@ Filesystem      Inodes   IUsed IFree IUse% Mounted on
 
 가장 흔한 오해는 "저널링을 쓰니 `write` 뒤에 fsync가 필요 없다"는 것이다. 저널링이 지키는 것은 파일 시스템 구조의 일관성이다. 애플리케이션이 쓴 데이터가 안전하게 저장되었다는 약속은 아니다.
 
-`ordered` 모드에서도 아직 커밋되지 않은 데이터는 크래시로 잃을 수 있다. `write`한 내용은 먼저 페이지 캐시에 머물기 때문이다([페이지 캐시와 fsync](/posts/cs/os/page-cache-fsync) 참고).
+`ordered` 모드에서도 아직 커밋되지 않은 데이터는 크래시로 잃을 수 있다. `write`한 내용은 먼저 페이지 캐시에 머물기 때문이다([페이지 캐시와 fsync](/posts/cs/os/page-cache-fsync/) 참고).
 
-설정 파일처럼 "옛 내용 아니면 새 내용"이어야 하는 파일은 임시 파일에 쓰고 `fsync`한 뒤 `rename`으로 바꿔치기하고, 마지막으로 디렉터리도 `fsync`한다. 1절에서 보았듯 `rename`은 디렉터리 항목만 바꾸는 연산이라 원자적으로 교체된다. 단계마다 왜 필요한지, `fsync`가 실패하면 어떻게 되는지는 [다음 글](/posts/cs/os/page-cache-fsync)에서 자세히 본다.
+설정 파일처럼 "옛 내용 아니면 새 내용"이어야 하는 파일은 임시 파일에 쓰고 `fsync`한 뒤 `rename`으로 바꿔치기하고, 마지막으로 디렉터리도 `fsync`한다. 1절에서 보았듯 `rename`은 디렉터리 항목만 바꾸는 연산이라 원자적으로 교체된다. 단계마다 왜 필요한지, `fsync`가 실패하면 어떻게 되는지는 [다음 글](/posts/cs/os/page-cache-fsync/)에서 자세히 본다.
 
 ---
 

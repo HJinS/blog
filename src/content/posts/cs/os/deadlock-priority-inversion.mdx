@@ -13,7 +13,7 @@ description: 계좌 이체 예시로 데드락이 생기는 과정과 Coffman 4�
 
 ## 개요
 
-[뮤텍스 글](/posts/cs/os/mutex-semaphore-spinlock)에서는 락으로 임계 구역을 지키는 방법을, [앞 글](/posts/cs/os/condition-variable-monitor)에서는 락을 쥔 채 조건을 기다리는 방법을 봤다. 락은 데이터를 지켜 주지만, 락을 두 개 이상 잡기 시작하면 새로운 종류의 문제가 생긴다. 프로그램이 에러 없이 조용히 멈추는 문제다.
+[뮤텍스 글](/posts/cs/os/mutex-semaphore-spinlock/)에서는 락으로 임계 구역을 지키는 방법을, [앞 글](/posts/cs/os/condition-variable-monitor/)에서는 락을 쥔 채 조건을 기다리는 방법을 봤다. 락은 데이터를 지켜 주지만, 락을 두 개 이상 잡기 시작하면 새로운 종류의 문제가 생긴다. 프로그램이 에러 없이 조용히 멈추는 문제다.
 
 이 글이 답하는 질문은 두 가지다.
 
@@ -151,7 +151,7 @@ while (true) {
 
 InnoDB가 대표적이다. MySQL 문서에 따르면 데드락 탐지는 기본으로 켜져 있고, 데드락이 생기면 트랜잭션 하나를 롤백한다. 탐지를 끄면(`innodb_deadlock_detect`) `innodb_lock_wait_timeout`으로 대기가 끊길 때까지 기다리게 된다. 롤백된 쪽은 `ERROR 1213 (40001): Deadlock found when trying to get lock; try restarting transaction`을 받는다.
 
-여기서 흔한 실수가 생긴다. 문서도 강조하듯 애플리케이션 로직이 올바르더라도 롤백된 트랜잭션을 **재시도하는 코드**는 직접 처리해야 한다. 데드락 자체보다 재시도를 처리하지 않아 사용자 오류로 번지는 경우가 더 흔하다. 갭 락 때문에 생기는 INSERT 데드락의 구체적인 모습은 [InnoDB 갭 락과 넥스트 키 락](/posts/cs/database/innodb-gap-next-key-lock)에서 다룬다.
+여기서 흔한 실수가 생긴다. 문서도 강조하듯 애플리케이션 로직이 올바르더라도 롤백된 트랜잭션을 **재시도하는 코드**는 직접 처리해야 한다. 데드락 자체보다 재시도를 처리하지 않아 사용자 오류로 번지는 경우가 더 흔하다. 갭 락 때문에 생기는 INSERT 데드락의 구체적인 모습은 [InnoDB 갭 락과 넥스트 키 락](/posts/cs/database/innodb-gap-next-key-lock/)에서 다룬다.
 
 ---
 
@@ -225,7 +225,7 @@ H는 L이 락을 풀어야 진행할 수 있다. 그런데 L은 M에게 CPU를 �
 - DB는 락 순서를 미리 정하기 어려워서 대기 그래프의 사이클을 탐지하고 희생자를 롤백한다. 롤백된 트랜잭션의 재시도는 애플리케이션 몫이다.
 - 우선순위 역전은 순환 없이도 높은 우선순위 작업이 중간 작업에 간접적으로 막히는 현상이며, 우선순위 상속이나 상한으로 푼다.
 
-여기까지가 CPU와 락 이야기다. [다음 글](/posts/cs/os/virtual-memory-page-table-tlb)부터는 메모리로 넘어가, 프로세스마다 자기만의 주소 공간을 갖게 해 주는 가상 메모리를 본다.
+여기까지가 CPU와 락 이야기다. [다음 글](/posts/cs/os/virtual-memory-page-table-tlb/)부터는 메모리로 넘어가, 프로세스마다 자기만의 주소 공간을 갖게 해 주는 가상 메모리를 본다.
 
 ---
 

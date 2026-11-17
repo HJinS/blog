@@ -13,7 +13,7 @@ description: 재고 차감 예시로 격리 수준이 왜 필요한지, ANSI 4�
 
 ## 개요
 
-[앞 글](/posts/cs/database/wal-aries-crash-recovery)에서는 트랜잭션이 장애가 나도 사라지지 않게 만드는 방법을 봤다. 이번 글은 ACID의 I, 즉 격리(isolation)를 다룬다. 장애가 없어도 트랜잭션 두 개가 동시에 돌면 데이터가 틀어질 수 있다.
+[앞 글](/posts/cs/database/wal-aries-crash-recovery/)에서는 트랜잭션이 장애가 나도 사라지지 않게 만드는 방법을 봤다. 이번 글은 ACID의 I, 즉 격리(isolation)를 다룬다. 장애가 없어도 트랜잭션 두 개가 동시에 돌면 데이터가 틀어질 수 있다.
 
 이 글이 답하는 질문은 두 가지다.
 
@@ -168,7 +168,7 @@ H5:  r1[x=50] r1[y=50] r2[x=50] r2[y=50] w1[y=-40] w2[x=-40] c1 c2
 3. T2도 같은 시점의 값을 읽고 "x에서 90을 빼도 된다"고 판단한다. x = -40을 쓴다.
 4. 둘 다 커밋된다. 합계는 -80이다.
 
-각 트랜잭션은 혼자 돌았다면 규칙을 지켰다. 두 트랜잭션이 쓴 행이 서로 다르니 같은 행을 두고 충돌한 적도 없다. 이 성질 때문에 쓰기 스큐는 같은 행의 충돌만 감지하는 방식으로는 잡히지 않는다. 당직 의사 예시로 보는 쓰기 스큐는 [MVCC와 스냅샷 격리 글](/posts/cs/database/mvcc-snapshot-isolation-write-skew)에서 자세히 다룬다.
+각 트랜잭션은 혼자 돌았다면 규칙을 지켰다. 두 트랜잭션이 쓴 행이 서로 다르니 같은 행을 두고 충돌한 적도 없다. 이 성질 때문에 쓰기 스큐는 같은 행의 충돌만 감지하는 방식으로는 잡히지 않는다. 당직 의사 예시로 보는 쓰기 스큐는 [MVCC와 스냅샷 격리 글](/posts/cs/database/mvcc-snapshot-isolation-write-skew/)에서 자세히 다룬다.
 
 ### 논문이 내린 결론
 
@@ -206,7 +206,7 @@ H5:  r1[x=50] r1[y=50] r2[x=50] r2[y=50] w1[y=-40] w2[x=-40] c1 c2
 
 표를 보면 격리 수준이 올라갈수록 읽기 락을 더 오래 잡는다. 팬텀을 막으려면 "아직 없는 행"까지 막아야 하므로, 행이 아니라 조건 범위를 잠가야 한다. 이게 락 방식에서 가장 비싼 부분이다.
 
-읽기 락과 쓰기 락을 모두 커밋까지 잡으면 SERIALIZABLE이 된다. 이 방식은 2단계 락킹(two-phase locking, 2PL)의 한 형태다. 왜 이렇게 하면 직렬 실행과 같은 결과가 보장되는지는 [직렬 가능성 글](/posts/cs/database/serializability-2pl-ssi)에서 다룬다.
+읽기 락과 쓰기 락을 모두 커밋까지 잡으면 SERIALIZABLE이 된다. 이 방식은 2단계 락킹(two-phase locking, 2PL)의 한 형태다. 왜 이렇게 하면 직렬 실행과 같은 결과가 보장되는지는 [직렬 가능성 글](/posts/cs/database/serializability-2pl-ssi/)에서 다룬다.
 
 **스냅샷 기반(snapshot-based)** 은 기다리게 하는 대신 데이터의 여러 버전을 남긴다. 이 방식을 다중 버전 동시성 제어(Multi-Version Concurrency Control, MVCC)라고 한다.
 
@@ -225,9 +225,9 @@ H5:  r1[x=50] r1[y=50] r2[x=50] r2[y=50] w1[y=-40] w2[x=-40] c1 c2
 
 실제 DB는 둘을 섞는다. 이 시리즈의 다음 세 글이 각각 한 조각씩을 맡는다.
 
-- [MVCC와 스냅샷 격리, 쓰기 스큐](/posts/cs/database/mvcc-snapshot-isolation-write-skew): 스냅샷이 어떻게 만들어지고 왜 쓰기 스큐를 막지 못하는지
-- [InnoDB 갭 락과 넥스트 키 락](/posts/cs/database/innodb-gap-next-key-lock): 아직 없는 행을 락으로 막는 방법
-- [직렬화 가능성, 2PL과 SSI](/posts/cs/database/serializability-2pl-ssi): 진짜 SERIALIZABLE을 만드는 두 방법
+- [MVCC와 스냅샷 격리, 쓰기 스큐](/posts/cs/database/mvcc-snapshot-isolation-write-skew/): 스냅샷이 어떻게 만들어지고 왜 쓰기 스큐를 막지 못하는지
+- [InnoDB 갭 락과 넥스트 키 락](/posts/cs/database/innodb-gap-next-key-lock/): 아직 없는 행을 락으로 막는 방법
+- [직렬화 가능성, 2PL과 SSI](/posts/cs/database/serializability-2pl-ssi/): 진짜 SERIALIZABLE을 만드는 두 방법
 
 ---
 
@@ -345,7 +345,7 @@ WHERE id = 1 AND version = 3;
 | 낙관적 락 (version) | 충돌이 드물고, 사용자 편집처럼 읽기와 쓰기 사이가 길 때 | 재시도 로직, 충돌이 잦으면 낭비 |
 | 격리 수준 올리기 (PostgreSQL RR, SERIALIZABLE) | 여러 행에 걸친 규칙을 지켜야 할 때 | 에러 `40001` 재시도 처리, 처리량 감소 |
 
-마지막 줄이 중요하다. 세 방법은 같은 행에 대한 갱신 손실을 막는다. 3절의 쓰기 스큐처럼 **서로 다른 행**에 걸친 규칙은 한 행의 version이나 행 락으로 막히지 않는다. 그때는 규칙에 관련된 행을 모두 잠그거나 SERIALIZABLE을 써야 한다. 그 이야기는 [직렬화 가능성 글](/posts/cs/database/serializability-2pl-ssi)에서 이어진다.
+마지막 줄이 중요하다. 세 방법은 같은 행에 대한 갱신 손실을 막는다. 3절의 쓰기 스큐처럼 **서로 다른 행**에 걸친 규칙은 한 행의 version이나 행 락으로 막히지 않는다. 그때는 규칙에 관련된 행을 모두 잠그거나 SERIALIZABLE을 써야 한다. 그 이야기는 [직렬화 가능성 글](/posts/cs/database/serializability-2pl-ssi/)에서 이어진다.
 
 ---
 

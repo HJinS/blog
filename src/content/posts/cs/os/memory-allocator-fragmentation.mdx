@@ -14,7 +14,7 @@ description: free를 했는데도 프로세스의 RSS가 줄지 않는 이유를
 
 ## 개요
 
-[앞 글](/posts/cs/os/overcommit-thrashing-oom-killer)에서는 메모리가 부족해지면 커널이 어떻게 반응하는지 봤다. 이번 글은 그 반대편, 애플리케이션이 메모리를 "돌려줬다고 생각하는데" 커널은 그렇게 보지 않는 상황을 다룬다.
+[앞 글](/posts/cs/os/overcommit-thrashing-oom-killer/)에서는 메모리가 부족해지면 커널이 어떻게 반응하는지 봤다. 이번 글은 그 반대편, 애플리케이션이 메모리를 "돌려줬다고 생각하는데" 커널은 그렇게 보지 않는 상황을 다룬다.
 
 이 글이 답하는 질문은 두 가지다.
 
@@ -129,7 +129,7 @@ Arena 1      Arena 2      Arena 3
 - `pmap`이나 `/proc/PID/smaps`에 64MB 안팎의 익명 매핑이 여러 개 보이면 arena를 의심한다.
 - Redis처럼 RSS와 실제 사용량을 같이 보여 주는 도구에서는 비율(`mem_fragmentation_ratio`)이 1을 크게 넘는 모습으로 관측된다.
 
-OOM 판정이 왜 이 숫자를 기준으로 하는지는 [앞 글](/posts/cs/os/overcommit-thrashing-oom-killer)에서 다뤘다.
+OOM 판정이 왜 이 숫자를 기준으로 하는지는 [앞 글](/posts/cs/os/overcommit-thrashing-oom-killer/)에서 다뤘다.
 
 ---
 
@@ -211,7 +211,7 @@ RSS가 오르는 서버를 만났다면 다음 순서로 좁힌다.
 - 스레드별 arena는 락 경합을 줄이는 대신 빈 조각을 공유하지 못해 RSS를 부풀린다.
 - 대응은 `MALLOC_ARENA_MAX`로 arena 수를 줄이거나 jemalloc으로 바꾸는 두 가지다. 어느 쪽이든 메모리와 지연 시간을 함께 측정해야 한다.
 
-여기까지가 메모리 이야기다. [다음 글](/posts/cs/os/filesystem-inode-journaling)부터는 I/O로 넘어가, 디스크 위의 데이터를 파일이라는 이름으로 찾아가게 해 주는 파일 시스템을 본다.
+여기까지가 메모리 이야기다. [다음 글](/posts/cs/os/filesystem-inode-journaling/)부터는 I/O로 넘어가, 디스크 위의 데이터를 파일이라는 이름으로 찾아가게 해 주는 파일 시스템을 본다.
 
 ---
 

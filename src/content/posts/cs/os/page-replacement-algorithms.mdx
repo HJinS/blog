@@ -14,7 +14,7 @@ description: 물리 메모리가 가득 찼을 때 어떤 페이지를 내보낼
 
 ## 개요
 
-[가상 메모리 글](/posts/cs/os/virtual-memory-page-table-tlb)에서는 RAM에 없는 페이지에 접근하면 페이지 폴트(page fault)가 나고, OS가 디스크에서 페이지를 읽어 온다고 했다(major fault). [앞 글](/posts/cs/os/fork-copy-on-write)에서는 COW로 메모리가 빠르게 늘어나는 경우를 봤다. 그런데 물리 메모리가 이미 가득 차 있으면 어떻게 될까? 누군가는 자리를 비워 줘야 한다.
+[가상 메모리 글](/posts/cs/os/virtual-memory-page-table-tlb/)에서는 RAM에 없는 페이지에 접근하면 페이지 폴트(page fault)가 나고, OS가 디스크에서 페이지를 읽어 온다고 했다(major fault). [앞 글](/posts/cs/os/fork-copy-on-write/)에서는 COW로 메모리가 빠르게 늘어나는 경우를 봤다. 그런데 물리 메모리가 이미 가득 차 있으면 어떻게 될까? 누군가는 자리를 비워 줘야 한다.
 
 이 글이 답하는 질문은 두 가지다.
 
@@ -277,7 +277,7 @@ MySQL InnoDB의 버퍼 풀은 LRU를 변형해서 쓴다. 핵심 아이디어는
 | Clock | 참조 비트 설정(하드웨어가 처리) | LRU 근사를 싸게 구현 | 1비트라 정확도 한계, 스캔에 여전히 취약 |
 | midpoint, 2Q, ARC | 리스트 이동이 일부 추가 | 스캔 내성, 최근성과 빈도의 균형 | 비율과 지연 시간 튜닝이 필요하고 구조가 복잡 |
 
-선택 기준은 두 가지로 줄일 수 있다. 접근마다 드는 비용을 얼마나 낼 수 있는가, 그리고 워크로드에 한 번 쓰고 마는 대량 접근이 있는가이다. 응용 레벨의 LRU 캐시를 직접 짜는 방법은 [LRU 캐시 설계 글](/posts/cs/algorithm/lru-cache-design)에서 다룬다.
+선택 기준은 두 가지로 줄일 수 있다. 접근마다 드는 비용을 얼마나 낼 수 있는가, 그리고 워크로드에 한 번 쓰고 마는 대량 접근이 있는가이다. 응용 레벨의 LRU 캐시를 직접 짜는 방법은 [LRU 캐시 설계 글](/posts/cs/algorithm/lru-cache-design/)에서 다룬다.
 
 ---
 
@@ -289,7 +289,7 @@ MySQL InnoDB의 버퍼 풀은 LRU를 변형해서 쓴다. 핵심 아이디어는
 - Clock은 참조 비트와 시계 바늘로 LRU를 싸게 근사한다. 접근 경로 비용이 없고, 교체할 때만 바늘이 움직인다.
 - LRU 계열은 한 번 쓰고 마는 대량 스캔에 약하다. InnoDB는 새 페이지를 midpoint에 넣고 재접근될 때만 승격해 이 문제를 줄인다.
 
-교체 알고리즘이 아무리 좋아도 작업 집합 자체가 RAM보다 크면 폴트는 줄지 않는다. [다음 글](/posts/cs/os/overcommit-thrashing-oom-killer)에서는 그때 생기는 스래싱과, 커널이 마지막 수단으로 프로세스를 죽이는 OOM Killer를 본다.
+교체 알고리즘이 아무리 좋아도 작업 집합 자체가 RAM보다 크면 폴트는 줄지 않는다. [다음 글](/posts/cs/os/overcommit-thrashing-oom-killer/)에서는 그때 생기는 스래싱과, 커널이 마지막 수단으로 프로세스를 죽이는 OOM Killer를 본다.
 
 ---
 

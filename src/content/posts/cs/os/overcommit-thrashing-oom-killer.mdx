@@ -14,7 +14,7 @@ description: malloc이 성공해도 메모리가 확보된 것이 아닌 이유�
 
 ## 개요
 
-[앞 글](/posts/cs/os/page-replacement-algorithms)에서는 물리 메모리가 가득 찼을 때 어떤 페이지를 내보낼지 고르는 알고리즘을 봤다. 이번 글은 그 질문을 한 칸 더 넓힌다. 내보낼 페이지조차 없으면 시스템은 어떻게 되는가?
+[앞 글](/posts/cs/os/page-replacement-algorithms/)에서는 물리 메모리가 가득 찼을 때 어떤 페이지를 내보낼지 고르는 알고리즘을 봤다. 이번 글은 그 질문을 한 칸 더 넓힌다. 내보낼 페이지조차 없으면 시스템은 어떻게 되는가?
 
 이 글이 답하는 질문은 세 가지다.
 
@@ -30,12 +30,12 @@ description: malloc이 성공해도 메모리가 확보된 것이 아닌 이유�
 
 프로그램이 `malloc(8GB)`를 호출하면 리눅스는 내부적으로 `mmap`이나 `brk`로 가상 주소 공간(virtual address space)만 늘려 준다. 물리 메모리(RAM)는 한 바이트도 쓰지 않는다. 이 시점에 받은 것은 "이 주소 범위를 써도 된다"는 약속뿐이다.
 
-물리 페이지는 그 주소에 **처음 접근하는 순간** 페이지 폴트를 거쳐 붙는다. [가상 메모리 글](/posts/cs/os/virtual-memory-page-table-tlb)에서 본 demand paging이다.
+물리 페이지는 그 주소에 **처음 접근하는 순간** 페이지 폴트를 거쳐 붙는다. [가상 메모리 글](/posts/cs/os/virtual-memory-page-table-tlb/)에서 본 demand paging이다.
 
 왜 이렇게 만들었을까. 프로그램이 요청한 메모리를 전부 쓰는 경우가 드물기 때문이다.
 
 - 큰 버퍼나 해시 테이블을 넉넉히 잡아 두고 일부만 쓴다. (희소 사용)
-- `fork` 직후 자식은 부모의 메모리를 복사하지 않고 공유한다. 쓰기가 일어나는 페이지만 나중에 복사한다. ([fork와 Copy-on-Write](/posts/cs/os/fork-copy-on-write)에서 다뤘다.)
+- `fork` 직후 자식은 부모의 메모리를 복사하지 않고 공유한다. 쓰기가 일어나는 페이지만 나중에 복사한다. ([fork와 Copy-on-Write](/posts/cs/os/fork-copy-on-write/)에서 다뤘다.)
 
 예를 들어 RAM 16GB 서버에서 프로세스 5개가 각각 8GB를 `malloc`했다고 하자. 약속한 총량은 40GB지만, 각 프로세스가 실제로 만진 양이 1GB씩이면 물리 메모리는 5GB만 쓴다. 커널은 약속을 넉넉하게 해 주고 평균적인 메모리 효율을 높인다. 이것을 오버커밋(overcommit)이라 한다.
 
@@ -178,7 +178,7 @@ dmesg | grep -i "killed process"
 컨테이너 경로에서 개발자가 가장 많이 당황하는 상황이 있다. 예를 들어 JVM 컨테이너가 137로 재시작되는데 힙 덤프를 보면 힙은 limit의 60%뿐인 경우다. 원인은 limit이 힙에만 걸리는 것이 아니라 cgroup 전체에 걸린다는 점이다. cgroup 사용량에는 이런 것들이 더해진다.
 
 - 힙 밖의 JVM 메모리: 메타스페이스(metaspace), 스레드 수 x 스레드 스택 크기, direct buffer, 네이티브 라이브러리
-- glibc 할당자의 arena 단편화([다음 글](/posts/cs/os/memory-allocator-fragmentation)에서 다룬다)
+- glibc 할당자의 arena 단편화([다음 글](/posts/cs/os/memory-allocator-fragmentation/)에서 다룬다)
 - 사이드카나 자식 프로세스
 - 회수할 수 없는 페이지: tmpfs, 아직 디스크에 쓰지 못한 dirty page
 
@@ -222,7 +222,7 @@ PSI는 `avg10`, `avg60`, `avg300`(최근 10초, 60초, 300초 평균)과 누적�
 - 컨테이너는 `memory.max`에서 cgroup 안의 OOM을 겪는다. 노드에 메모리가 남아도 죽고, limit은 힙이 아니라 cgroup 전체에 적용된다.
 - `/proc/pressure/memory`의 PSI 같은 압박 지표를 보고 있으면 죽기 전에 알아챌 수 있다.
 
-힙이 limit보다 한참 작은데도 RSS가 계속 크다면, 커널이 아니라 프로세스 안의 할당자를 의심해야 한다. [다음 글](/posts/cs/os/memory-allocator-fragmentation)에서 malloc이 메모리를 어떻게 나누고 왜 돌려주지 못하는지 본다.
+힙이 limit보다 한참 작은데도 RSS가 계속 크다면, 커널이 아니라 프로세스 안의 할당자를 의심해야 한다. [다음 글](/posts/cs/os/memory-allocator-fragmentation/)에서 malloc이 메모리를 어떻게 나누고 왜 돌려주지 못하는지 본다.
 
 ---
 

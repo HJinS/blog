@@ -23,7 +23,7 @@ description: 계좌 이체 두 건과 크래시 한 번을 로그 레코드 단�
 
 이 글은 처음부터 끝까지 예시 하나만 쓴다. 계좌 이체 트랜잭션 두 개(T1은 커밋, T2는 미커밋)와 크래시 한 번이다. 이 예시의 로그 레코드를 LSN 번호까지 붙여서 복구의 마지막 단계까지 따라간다.
 
-앞 글 [조인 알고리즘과 카디널리티 추정](/posts/cs/database/join-algorithms-cardinality)이 읽기 쪽 이야기였다면, 이 글은 쓰기가 어떻게 살아남는지에 대한 이야기다. `write()`가 성공해도 디스크에 없을 수 있는 이유는 [페이지 캐시와 fsync](/posts/cs/os/page-cache-fsync)에서 다룬다.
+앞 글 [조인 알고리즘과 카디널리티 추정](/posts/cs/database/join-algorithms-cardinality/)이 읽기 쪽 이야기였다면, 이 글은 쓰기가 어떻게 살아남는지에 대한 이야기다. `write()`가 성공해도 디스크에 없을 수 있는 이유는 [페이지 캐시와 fsync](/posts/cs/os/page-cache-fsync/)에서 다룬다.
 
 ---
 
@@ -475,7 +475,7 @@ LSN 70이 flush되기 전에 죽었다면 어떨까? 그래도 괜찮다. WAL �
 
 섀도 페이징은 고친 페이지를 제자리에 덮어쓰지 않고 새 위치에 쓴다. 커밋할 때 "어느 페이지가 현재 버전인지" 가리키는 포인터만 원자적으로 바꾼다.
 
-redo-only 계열은 데이터를 제자리에서 고치지 않는다. 그래서 미커밋 데이터가 디스크의 정본에 섞일 일이 없고 undo가 필요 없다. 자세한 구조는 [B+tree vs LSM-tree](/posts/cs/database/b-tree-vs-lsm-tree)에서 다룬다.
+redo-only 계열은 데이터를 제자리에서 고치지 않는다. 그래서 미커밋 데이터가 디스크의 정본에 섞일 일이 없고 undo가 필요 없다. 자세한 구조는 [B+tree vs LSM-tree](/posts/cs/database/b-tree-vs-lsm-tree/)에서 다룬다.
 
 ### ARIES 안에서 조절하는 다이얼
 
@@ -498,7 +498,7 @@ redo-only 계열은 데이터를 제자리에서 고치지 않는다. 그래서 
 
 WAL은 복구뿐 아니라 복제에도 쓰인다. 로그를 복제본에 그대로 보내 재생하면 복제본은 같은 상태가 된다. 이때 로그가 "어떤 바이트가 바뀌었는지"를 담는 물리 로그(physical log)인지, "어떤 행이 바뀌었는지"를 담는 논리 로그(logical log)인지가 비용을 가른다.
 
-물리 로그는 페이지 단위 변경을 그대로 담는다. 그래서 행 하나를 고쳐도 인덱스 갱신까지 모두 로그에 실려 복제 대역폭이 커질 수 있다. Uber가 2016년에 PostgreSQL에서 MySQL로 옮기며 든 이유 중 하나가 이 문제였다. 사례의 자세한 내용은 [클러스터드 vs 세컨더리 인덱스](/posts/cs/database/clustered-vs-secondary-index) 7절에서 다뤘다. 2016년, PostgreSQL 9.2 시점의 이야기이고, 이후 PostgreSQL에는 논리 복제가 추가됐다.
+물리 로그는 페이지 단위 변경을 그대로 담는다. 그래서 행 하나를 고쳐도 인덱스 갱신까지 모두 로그에 실려 복제 대역폭이 커질 수 있다. Uber가 2016년에 PostgreSQL에서 MySQL로 옮기며 든 이유 중 하나가 이 문제였다. 사례의 자세한 내용은 [클러스터드 vs 세컨더리 인덱스](/posts/cs/database/clustered-vs-secondary-index/) 7절에서 다뤘다. 2016년, PostgreSQL 9.2 시점의 이야기이고, 이후 PostgreSQL에는 논리 복제가 추가됐다.
 
 ---
 

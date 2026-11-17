@@ -13,7 +13,7 @@ description: get과 put을 모두 O(1)로 만드는 LRU 캐시를 해시맵과 �
 
 ## 개요
 
-[앞 글](/posts/cs/algorithm/hash-table)에서는 해시 테이블이 키 하나를 평균 $O(1)$에 찾는 원리를 봤다. 이번 글은 해시 테이블에 연결 리스트를 붙여서 만드는 대표적인 자료구조, LRU 캐시를 직접 설계한다.
+[앞 글](/posts/cs/algorithm/hash-table/)에서는 해시 테이블이 키 하나를 평균 $O(1)$에 찾는 원리를 봤다. 이번 글은 해시 테이블에 연결 리스트를 붙여서 만드는 대표적인 자료구조, LRU 캐시를 직접 설계한다.
 
 이 글이 답하는 질문은 두 가지다.
 
@@ -38,7 +38,7 @@ description: get과 put을 모두 O(1)로 만드는 LRU 캐시를 해시맵과 �
 
 LRU가 가장 널리 쓰이는 이유는 "최근에 쓴 데이터는 곧 다시 쓴다"는 시간 지역성(temporal locality)이 대부분의 서비스에서 잘 맞기 때문이다. 인기 상품, 로그인한 사용자 세션처럼 일부 키에 접근이 몰리는 패턴에서 특히 잘 동작한다.
 
-정책끼리의 적중률 비교와 Belady 모순은 [페이지 교체 알고리즘 글](/posts/cs/os/page-replacement-algorithms)에서 다뤘다. 이 글은 LRU를 **어떻게 빠르게 구현하는가**에 집중한다.
+정책끼리의 적중률 비교와 Belady 모순은 [페이지 교체 알고리즘 글](/posts/cs/os/page-replacement-algorithms/)에서 다뤘다. 이 글은 LRU를 **어떻게 빠르게 구현하는가**에 집중한다.
 
 ---
 
@@ -71,7 +71,7 @@ LRU가 가장 널리 쓰이는 이유는 "최근에 쓴 데이터는 곧 다시 
 
 **리스트만 쓰는 경우.** 사용한 순서대로 줄을 세우면 3번은 쉽다. 맨 끝이 가장 오래된 항목이다. 하지만 1번이 $O(n)$이다. 키 하나를 찾으려면 리스트를 처음부터 따라가야 한다.
 
-**시각 + 힙(heap)을 쓰는 경우.** 최소 힙은 가장 작은 값을 항상 맨 위에 두는 트리 구조다([힙과 타이밍 휠 글](/posts/cs/algorithm/heap-timing-wheel)에서 자세히 다룬다). 마지막 사용 시각을 기준으로 최소 힙을 만들면 가장 오래된 항목은 바로 보인다. 그러나 `get` 때마다 시각이 바뀌므로 힙 안의 위치를 고쳐야 하고, 이것이 $O(\log n)$이다.
+**시각 + 힙(heap)을 쓰는 경우.** 최소 힙은 가장 작은 값을 항상 맨 위에 두는 트리 구조다([힙과 타이밍 휠 글](/posts/cs/algorithm/heap-timing-wheel/)에서 자세히 다룬다). 마지막 사용 시각을 기준으로 최소 힙을 만들면 가장 오래된 항목은 바로 보인다. 그러나 `get` 때마다 시각이 바뀌므로 힙 안의 위치를 고쳐야 하고, 이것이 $O(\log n)$이다.
 
 | 구조 | 키로 찾기 | 최근으로 옮기기 | 가장 오래된 것 지우기 |
 | --- | --- | --- | --- |
@@ -267,7 +267,7 @@ class LruCache<K, V> extends LinkedHashMap<K, V> {
 
 ### Redis: 샘플링 LRU
 
-Redis는 `maxmemory` 상한에 도달하면 `maxmemory-policy`에 따라 키를 축출한다. 정책 종류 비교는 [Redis 비교 글](/posts/dev/cache/redis-summary)에 정리되어 있으니, 여기서는 `allkeys-lru`가 **어떻게** 동작하는지만 본다.
+Redis는 `maxmemory` 상한에 도달하면 `maxmemory-policy`에 따라 키를 축출한다. 정책 종류 비교는 [Redis 비교 글](/posts/dev/cache/redis-summary/)에 정리되어 있으니, 여기서는 `allkeys-lru`가 **어떻게** 동작하는지만 본다.
 
 Redis 문서에 따르면 Redis는 정확한 LRU를 계산하지 않는다. 키를 몇 개 무작위로 뽑아서 그중 마지막 접근이 가장 오래된 키를 축출한다. 문서는 정확한 LRU를 쓰지 않는 이유로 메모리 비용을 든다. 모든 키를 하나의 순서로 엮어 두지 않아도 되니 키마다 붙는 메타데이터가 줄어든다.
 
@@ -287,7 +287,7 @@ Redis 문서에 따르면 Redis는 정확한 LRU를 계산하지 않는다. 키�
 
 ### 리눅스: Clock
 
-운영체제의 페이지 교체도 같은 이유로 정확한 LRU를 쓰지 않는다. 메모리 접근마다 리스트를 고치는 것은 불가능에 가깝기 때문이다. 대신 하드웨어가 켜 주는 참조 비트 1개만 보고 시계 바늘을 돌리는 Clock 알고리즘을 쓴다. 자세한 동작은 [페이지 교체 알고리즘 글](/posts/cs/os/page-replacement-algorithms)에서 다뤘다.
+운영체제의 페이지 교체도 같은 이유로 정확한 LRU를 쓰지 않는다. 메모리 접근마다 리스트를 고치는 것은 불가능에 가깝기 때문이다. 대신 하드웨어가 켜 주는 참조 비트 1개만 보고 시계 바늘을 돌리는 Clock 알고리즘을 쓴다. 자세한 동작은 [페이지 교체 알고리즘 글](/posts/cs/os/page-replacement-algorithms/)에서 다뤘다.
 
 두 근사의 공통점은 같다. **접근 경로의 비용을 거의 0으로 만들고, 그 대가로 축출 순간의 정확도를 조금 포기한다.**
 
@@ -322,7 +322,7 @@ Caffeine은 축출 정책도 순수 LRU가 아니다. LRU는 한 번 훑고 마�
 
 - 새 항목은 먼저 작은 LRU 구역인 윈도(admission window)에 들어간다.
 - 윈도에서 밀려난 항목은 큰 Segmented LRU 구역(main space)으로 들어가려 한다. 이때 TinyLFU 승인 정책(admission policy)이 들여보낼지 결정한다.
-- 판단 근거는 빈도 스케치(frequency sketch)다. 항목마다 정확한 카운터를 두는 대신, 4비트 카운터를 쓰는 Count-Min Sketch로 과거 사용 빈도를 확률적으로 추정한다. 확률적 자료구조는 [확률적 자료구조 글](/posts/cs/algorithm/probabilistic-data-structures)에서 다룬다.
+- 판단 근거는 빈도 스케치(frequency sketch)다. 항목마다 정확한 카운터를 두는 대신, 4비트 카운터를 쓰는 Count-Min Sketch로 과거 사용 빈도를 확률적으로 추정한다. 확률적 자료구조는 [확률적 자료구조 글](/posts/cs/algorithm/probabilistic-data-structures/)에서 다룬다.
 - 윈도와 메인 구역의 크기 비율은 고정이 아니라 hill climbing 최적화로 적응적으로 정한다.
 
 정리하면 Caffeine은 "최근성은 작은 윈도가, 빈도는 스케치가" 맡도록 나눴다. 그리고 동시성 문제는 정책과 분리해 버퍼로 풀었다.

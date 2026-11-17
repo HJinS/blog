@@ -13,7 +13,7 @@ description: 프로세스가 죽은 뒤에도 흔적이 남는 이유와 좀비�
 
 ## 개요
 
-[앞 글](/posts/cs/os/process-vs-thread-context-switching)에서는 프로세스와 스레드가 무엇이 다른지 봤다. 이번 글은 프로세스의 끝을 다룬다. 프로세스는 `exit()`을 부르면 바로 사라질 것 같지만, 실제로는 한동안 흔적이 남는다.
+[앞 글](/posts/cs/os/process-vs-thread-context-switching/)에서는 프로세스와 스레드가 무엇이 다른지 봤다. 이번 글은 프로세스의 끝을 다룬다. 프로세스는 `exit()`을 부르면 바로 사라질 것 같지만, 실제로는 한동안 흔적이 남는다.
 
 이 글이 답하는 질문은 두 가지다.
 
@@ -217,7 +217,7 @@ Kubernetes Pod 스펙에는 `docker run --init`에 해당하는 옵션이 없어
 - 그래서 컨테이너에서 핸들러 없는 앱이 PID 1이면 `SIGTERM`이 무시되어 유예 시간 뒤 `SIGKILL`(137)로 죽고, 자식이 쌓이면 좀비로 PID가 고갈된다.
 - 해결은 `docker run --init`이나 tini로 작은 init을 PID 1에 두는 것이다. exec form 사용과 앱의 `SIGTERM` 핸들러 구현도 함께 챙긴다.
 
-[다음 글](/posts/cs/os/cfs-scheduler-cpu-throttling)에서는 살아 있는 프로세스로 돌아가, 스케줄러가 CPU를 나누는 방식과 컨테이너 CPU limit이 만드는 지연을 본다.
+[다음 글](/posts/cs/os/cfs-scheduler-cpu-throttling/)에서는 살아 있는 프로세스로 돌아가, 스케줄러가 CPU를 나누는 방식과 컨테이너 CPU limit이 만드는 지연을 본다.
 
 ---
 

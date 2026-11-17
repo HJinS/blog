@@ -13,7 +13,7 @@ description: 파티션 키 설계부터 Consumer Rebalancing까지 — Kafka에�
 
 **이 글에서는 Partition Key 설계가 어떻게 시스템 아키텍처를 결정하는가**를 다룬다.
 
-Kafka의 기본 구조와 아키텍처 (Broker, Replication, Producer/Consumer 프로토콜)는 **[kafka-architecture-fundamentals](/posts/dev/messaging/kafka-architecture-fundamentals)** 에서 배운다.
+Kafka의 기본 구조와 아키텍처 (Broker, Replication, Producer/Consumer 프로토콜)는 **[kafka-architecture-fundamentals](/posts/dev/messaging/kafka-architecture-fundamentals/)** 에서 배운다.
 
 ```
 Kafka 핵심 개념 3가지:
@@ -648,7 +648,7 @@ while (true) {
 }
 ```
 
-**보장하는 범위는 Kafka 안까지다.** 위 루프에서 `send` 대신 외부 DB에 INSERT하면, 그 INSERT는 Kafka 트랜잭션에 들어가지 않는다. DB에 쓴 뒤 트랜잭션이 abort되면 DB 쓰기만 남고, 재처리 때 다시 쓰게 된다. 외부 시스템에 쓰는 경우에는 위의 At-Least-Once 방식대로 멱등하게 처리해야 한다. 자세한 내용은 [멱등성과 정확히 한 번 처리](/posts/cs/distributed/idempotency-exactly-once)를 참고한다.
+**보장하는 범위는 Kafka 안까지다.** 위 루프에서 `send` 대신 외부 DB에 INSERT하면, 그 INSERT는 Kafka 트랜잭션에 들어가지 않는다. DB에 쓴 뒤 트랜잭션이 abort되면 DB 쓰기만 남고, 재처리 때 다시 쓰게 된다. 외부 시스템에 쓰는 경우에는 위의 At-Least-Once 방식대로 멱등하게 처리해야 한다. 자세한 내용은 [멱등성과 정확히 한 번 처리](/posts/cs/distributed/idempotency-exactly-once/)를 참고한다.
 
 **비용:** 트랜잭션마다 커밋 마커 쓰기와 트랜잭션 로그 쓰기가 추가되는데, 이 오버헤드는 트랜잭션에 담긴 메시지 수와 무관하게 거의 일정하다. 그래서 메시지를 많이 묶을수록 비용이 작아진다. Confluent의 설명에 따르면 1KB 메시지를 100ms마다 커밋하는 프로듀서는 처리량이 3% 정도만 줄지만, 메시지가 더 작거나 커밋 간격이 더 짧으면 저하가 더 커진다. 트랜잭션을 길게 잡을수록 종단 지연이 늘어나는 것이 트레이드오프다.
 
@@ -705,5 +705,5 @@ Kafka는 단순해 보이지만, 파티셔닝 설계 하나로 시스템의 확�
 
 ## 관련 글
 
-- [멱등성과 정확히 한 번 처리](/posts/cs/distributed/idempotency-exactly-once)
-- [일관성 모델과 쿼럼: R+W>N이 선형화를 보장하지 않는 이유](/posts/cs/distributed/consistency-models-quorum)
+- [멱등성과 정확히 한 번 처리](/posts/cs/distributed/idempotency-exactly-once/)
+- [일관성 모델과 쿼럼: R+W>N이 선형화를 보장하지 않는 이유](/posts/cs/distributed/consistency-models-quorum/)
