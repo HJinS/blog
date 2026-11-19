@@ -98,7 +98,7 @@ t=2   follower 1 promoted to leader   -> balance is still old value
       => client saw OK, but the write is gone
 ```
 
-클라이언트는 성공 응답을 받았는데 데이터가 사라졌다. 이런 유실을 감수할지 판단하는 기준은 [Redis vs RDB 글](/posts/dev/cache/redis-vs-rdb-loss-risk/)에서 다룬 것과 같다. "이 값이 유실되면 정확히 무슨 일이 생기는가"를 먼저 따진다.
+클라이언트는 성공 응답을 받았는데 데이터가 사라졌다. 이런 유실을 감수할지 판단하는 기준은 [Redis TTL vs 관계형 DB 글](/posts/dev/cache/redis-vs-rdb-loss-risk/)에서 다룬 것과 같다. "이 값이 유실되면 정확히 무슨 일이 생기는가"를 먼저 따진다.
 
 ### 그 사이: MySQL 반동기 복제
 

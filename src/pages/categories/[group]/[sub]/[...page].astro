@@ -11,6 +11,7 @@ import Pagination from "@/components/Pagination.astro";
 import { getCategoryTree } from "@/utils/getUniqueCategories";
 import { getPostCategoryPath } from "@/utils/getPostPaths";
 import { getSortedPosts } from "@/utils/getSortedPosts";
+import { getCategoryInfo } from "@/utils/getCategoryInfo";
 import { useTranslations } from "@/i18n";
 import config from "@/config";
 
@@ -43,11 +44,17 @@ const t = useTranslations(locale);
 const name = `${group} / ${sub}`;
 const pageSuffix =
   page.currentPage > 1 ? ` (${t.pagination.page} ${page.currentPage})` : "";
-const pageDesc = `${t.pages.categoryDesc} "${name}".`;
+const info = getCategoryInfo([group, sub]);
+const groupInfo = getCategoryInfo([group]);
+const heading = info ? info.label : `${t.pages.categoryTitle}: ${name}`;
+const titleText = info
+  ? `${info.label} - ${groupInfo?.label ?? group}`
+  : `${t.pages.categoryTitle}: ${name}`;
+const pageDesc = info?.description ?? `${t.pages.categoryDesc} "${name}".`;
 ---
 
 <Layout
-  title={`${t.pages.categoryTitle}: ${name}${pageSuffix} | ${config.site.title}`}
+  title={`${titleText}${pageSuffix} | ${config.site.title}`}
   description={pageDesc}
   noindex={page.currentPage > 1}
 >
@@ -56,7 +63,7 @@ const pageDesc = `${t.pages.categoryDesc} "${name}".`;
   <Breadcrumb />
 
   <Main
-    pageTitle={`${t.pages.categoryTitle}: ${name}`}
+    pageTitle={heading}
     {pageDesc}
   >
     <ul>

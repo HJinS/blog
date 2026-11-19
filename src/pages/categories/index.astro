@@ -7,6 +7,7 @@ import Main from "@/components/Main.astro";
 import Footer from "@/components/Footer.astro";
 import Category from "@/components/Category.astro";
 import { getCategoryTree } from "@/utils/getUniqueCategories";
+import { categoriesIndexDescription } from "@/utils/getCategoryInfo";
 import { useTranslations } from "@/i18n";
 import config from "@/config";
 
@@ -19,13 +20,13 @@ const t = useTranslations(locale);
 
 <Layout
   title={`${t.pages.categoriesTitle} | ${config.site.title}`}
-  description={t.pages.categoriesDesc}
+  description={categoriesIndexDescription}
 >
   <Header />
 
   <Breadcrumb />
 
-  <Main pageTitle={t.pages.categoriesTitle} pageDesc={t.pages.categoriesDesc}>
+  <Main pageTitle={t.pages.categoriesTitle} pageDesc={categoriesIndexDescription}>
     {
       tree.map(({ group, count, subs }) => (
         <section class="mb-8">

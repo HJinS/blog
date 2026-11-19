@@ -473,7 +473,7 @@ M_union[j] = max(A[j], B[j])
 - 오차가 "쓸데없는 확인 한 번"으로 끝나면(Bloom filter), 뒤에 정확한 확인 단계가 있다는 전제에서 안전하다.
 - 오차가 숫자 자체에 남으면(HyperLogLog), 그 숫자를 보는 사람이 1% 안팎의 흔들림을 받아들일 수 있을 때만 쓴다. 대시보드는 되고 정산은 안 된다.
 
-Redis에서 이 구조들이 어떤 자료형으로 노출되는지는 [Redis 비교](/posts/dev/cache/redis-summary/) 글에서 정리했다. 다음 글에서는 정렬 상태를 유지하는 또 다른 구조인 [힙과 타이밍 휠](/posts/cs/algorithm/heap-timing-wheel/)을 본다.
+Redis에서 이 구조들이 어떤 자료형으로 노출되는지는 [Redis 정리](/posts/dev/cache/redis-summary/) 글에서 정리했다. 다음 글에서는 정렬 상태를 유지하는 또 다른 구조인 [힙과 타이밍 휠](/posts/cs/algorithm/heap-timing-wheel/)을 본다.
 
 ---
 

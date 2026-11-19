@@ -76,7 +76,14 @@ GitHub Pages는 정적 디렉토리(`.../index.html`) 구조로 서빙하므로 
 
 ---
 
-## 5. 배포 전 확인 명령어
+## 5. 새 카테고리 폴더를 추가할 때
+
+`src/content/posts/<대분류>/<소분류>/` 폴더를 새로 만들면 `src/utils/getCategoryInfo.ts`에 한국어 이름(`label`)과 설명(`description`)도 함께 추가합니다.
+등록하지 않으면 카테고리 페이지의 제목과 메타 설명이 영어 템플릿 문구(`Category: ...`, `All the articles in the category ...`)로 나와, 다른 카테고리 페이지와 구별되지 않는 얇은 페이지가 됩니다.
+
+---
+
+## 6. 배포 전 확인 명령어
 
 글 작성을 마친 후 아래 명령어로 빌드 및 포맷 이상 유무를 확인할 수 있습니다.
 

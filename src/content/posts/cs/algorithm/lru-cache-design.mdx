@@ -267,7 +267,7 @@ class LruCache<K, V> extends LinkedHashMap<K, V> {
 
 ### Redis: 샘플링 LRU
 
-Redis는 `maxmemory` 상한에 도달하면 `maxmemory-policy`에 따라 키를 축출한다. 정책 종류 비교는 [Redis 비교 글](/posts/dev/cache/redis-summary/)에 정리되어 있으니, 여기서는 `allkeys-lru`가 **어떻게** 동작하는지만 본다.
+Redis는 `maxmemory` 상한에 도달하면 `maxmemory-policy`에 따라 키를 축출한다. 정책 종류 비교는 [Redis 정리 글](/posts/dev/cache/redis-summary/)에 정리되어 있으니, 여기서는 `allkeys-lru`가 **어떻게** 동작하는지만 본다.
 
 Redis 문서에 따르면 Redis는 정확한 LRU를 계산하지 않는다. 키를 몇 개 무작위로 뽑아서 그중 마지막 접근이 가장 오래된 키를 축출한다. 문서는 정확한 LRU를 쓰지 않는 이유로 메모리 비용을 든다. 모든 키를 하나의 순서로 엮어 두지 않아도 되니 키마다 붙는 메타데이터가 줄어든다.
 

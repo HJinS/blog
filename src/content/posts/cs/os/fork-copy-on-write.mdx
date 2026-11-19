@@ -21,7 +21,7 @@ Redis에 쓰기 트래픽이 많은 상태에서 BGSAVE가 돌면 서버 메모�
 - `fork()`는 24GB짜리 프로세스를 어떻게 순식간에(그러나 완전히 공짜는 아니게) 복제하는가
 - 복제된 뒤에는 어떤 규칙으로 메모리가 늘어나고, 얼마나 늘어나는가
 
-주소 변환과 페이지 테이블이 낯설다면 [가상 메모리, 페이지 테이블, TLB](/posts/cs/os/virtual-memory-page-table-tlb/)를 먼저 읽으면 좋다. Redis에서 "어떤 값을 어디에 저장할까"를 정하는 이야기는 [Redis vs RDB](/posts/dev/cache/redis-vs-rdb-loss-risk/)에서 다뤘고, 이 글은 그 아래층인 OS가 스냅샷을 어떻게 만드는지에 집중한다.
+주소 변환과 페이지 테이블이 낯설다면 [가상 메모리, 페이지 테이블, TLB](/posts/cs/os/virtual-memory-page-table-tlb/)를 먼저 읽으면 좋다. Redis에서 "어떤 값을 어디에 저장할까"를 정하는 이야기는 [Redis TTL vs 관계형 DB](/posts/dev/cache/redis-vs-rdb-loss-risk/)에서 다뤘고, 이 글은 그 아래층인 OS가 스냅샷을 어떻게 만드는지에 집중한다.
 
 ---
 
@@ -195,7 +195,7 @@ BGSAVE 때 응답이 느려지고 메모리가 급증한다면, 원인은 fork �
 - replica에서 스냅샷을 수행해 primary는 fork 영향을 받지 않게 한다.
 - `maxmemory`에 COW 여유를 반영하고 `vm.overcommit_memory`를 1로 둔다.
 
-운영 관점에서 이 이야기는 [Redis vs RDB](/posts/dev/cache/redis-vs-rdb-loss-risk/)의 판단과 이어진다. 그 글은 "유실돼도 괜찮은 값은 Redis에 둔다"는 기준이었다. 그런데 RDB 스냅샷에 의존한다면 복구 지점이 마지막 스냅샷이고, 그 스냅샷을 만드는 비용이 이 글의 fork와 COW다. 저장소를 고를 때는 유실 시 결과뿐 아니라 영속화 방식이 평소 서비스에 내는 비용도 함께 봐야 한다.
+운영 관점에서 이 이야기는 [Redis TTL vs 관계형 DB](/posts/dev/cache/redis-vs-rdb-loss-risk/)의 판단과 이어진다. 그 글은 "유실돼도 괜찮은 값은 Redis에 둔다"는 기준이었다. 그런데 RDB 스냅샷에 의존한다면 복구 지점이 마지막 스냅샷이고, 그 스냅샷을 만드는 비용이 이 글의 fork와 COW다. 저장소를 고를 때는 유실 시 결과뿐 아니라 영속화 방식이 평소 서비스에 내는 비용도 함께 봐야 한다.
 
 ---
 

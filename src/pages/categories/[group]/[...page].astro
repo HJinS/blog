@@ -12,6 +12,7 @@ import Pagination from "@/components/Pagination.astro";
 import { getCategoryTree } from "@/utils/getUniqueCategories";
 import { getPostCategoryPath } from "@/utils/getPostPaths";
 import { getSortedPosts } from "@/utils/getSortedPosts";
+import { getCategoryInfo } from "@/utils/getCategoryInfo";
 import { useTranslations } from "@/i18n";
 import config from "@/config";
 
@@ -38,11 +39,13 @@ const locale = Astro.currentLocale ?? config.site.lang;
 const t = useTranslations(locale);
 const pageSuffix =
   page.currentPage > 1 ? ` (${t.pagination.page} ${page.currentPage})` : "";
-const pageDesc = `${t.pages.categoryDesc} "${group}".`;
+const info = getCategoryInfo([group]);
+const heading = info ? info.label : `${t.pages.categoryTitle}: ${group}`;
+const pageDesc = info?.description ?? `${t.pages.categoryDesc} "${group}".`;
 ---
 
 <Layout
-  title={`${t.pages.categoryTitle}: ${group}${pageSuffix} | ${config.site.title}`}
+  title={`${heading}${pageSuffix} | ${config.site.title}`}
   description={pageDesc}
   noindex={page.currentPage > 1}
 >
@@ -51,7 +54,7 @@ const pageDesc = `${t.pages.categoryDesc} "${group}".`;
   <Breadcrumb />
 
   <Main
-    pageTitle={`${t.pages.categoryTitle}: ${group}`}
+    pageTitle={heading}
     {pageDesc}
   >
     {
